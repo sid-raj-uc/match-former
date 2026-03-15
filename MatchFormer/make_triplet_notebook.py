@@ -129,10 +129,11 @@ def get_gt_match(pt1, depth1_path, pose1, pose2, K):
     y_c1 = (pt1[1] - cy) * z / fy
     p_c1 = np.array([x_c1, y_c1, z, 1.0])
     
-    # 2. Camera 1 -> World -> Camera 2
-    # Poses from ScanNet are Camera-to-World (T_WC)
-    # T_12 = T_W2C @ T_C1W = inv(pose2) @ pose1
-    T_12 = np.linalg.inv(pose2) @ pose1
+    # 2. Transform Camera 1 -> World -> Camera 2
+    # Poses from ScanNet are Camera-to-World (T_WC) in OpenGL coordinates.
+    # We must convert to OpenCV coordinates (+Z forward)
+    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
+    T_12 = T_cv2gl @ np.linalg.inv(pose2) @ pose1 @ T_cv2gl
     p_c2 = T_12 @ p_c1
     
     # 3. Camera 2 to Pixel coordinates
@@ -162,7 +163,8 @@ def plot_triplet(img1_idx, img2_idx, query_points):
     # Check if pose contains inf or nan
     if not np.isfinite(T1).all() or not np.isfinite(T2).all(): return
         
-    F = compute_fundamental_matrix(T1, T2, K, K)
+    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
+    F = compute_fundamental_matrix(T1 @ T_cv2gl, T2 @ T_cv2gl, K, K)
     
     depth1_path = os.path.join(data_dir, 'depth', f'{img1_idx_num}.png')
     

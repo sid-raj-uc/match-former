@@ -72,28 +72,23 @@ def get_image_tensor(path):
     img_tensor = torch.from_numpy(img).float() / 255.0
     return img_tensor.unsqueeze(0).unsqueeze(0)
 
-def compute_epipolar_errors(mkpts0, mkpts1, F):
-    if len(mkpts0) == 0: return np.array([])
-    p0 = np.concatenate([mkpts0, np.ones((len(mkpts0), 1))], axis=1)
-    p1 = np.concatenate([mkpts1, np.ones((len(mkpts1), 1))], axis=1)
-    
-    l_prime = p0 @ F.T 
-    num = np.abs(np.sum(l_prime * p1, axis=1))
-    denom = np.sqrt(l_prime[:, 0]**2 + l_prime[:, 1]**2)
-    return num / (denom + 1e-8)
+def compute_gt_errors(mkpts1, gt_mkpts1):
+    if len(mkpts1) == 0: return np.array([])
+    return np.linalg.norm(mkpts1 - gt_mkpts1, axis=1)
 
-def get_gt_match_validity(mkpts0, depth1_path, T1, T2, K):
+def get_gt_matches(mkpts0, depth1_path, T1, T2, K):
     """
     Project points from image 1 to image 2 based on depth.
-    Return mask of valid matched points.
+    Return mask of valid matched points and their coordinates.
     """
     depth = cv2.imread(depth1_path, cv2.IMREAD_UNCHANGED)
-    if depth is None: return np.zeros(len(mkpts0), dtype=bool)
+    if depth is None: return np.zeros(len(mkpts0), dtype=bool), np.zeros_like(mkpts0)
     
     # Scale depth identical to projection map
     depth = (depth.astype(float) / 1000.0)
     
     valid_mask = np.zeros(len(mkpts0), dtype=bool)
+    gt_pts = np.zeros_like(mkpts0)
     for i, pt in enumerate(mkpts0):
         # Sample Depth from Nearest Neighbor (ensure bounds)
         x_idx, y_idx = int(round(pt[0])), int(round(pt[1]))
@@ -110,7 +105,8 @@ def get_gt_match_validity(mkpts0, depth1_path, T1, T2, K):
         p_c1 = np.array([x_c1, y_c1, z, 1.0])
         
         # Transform
-        T_12 = np.linalg.inv(T2) @ T1
+        T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
+        T_12 = T_cv2gl @ np.linalg.inv(T2) @ T1 @ T_cv2gl
         p_c2 = T_12 @ p_c1
         if p_c2[2] <= 0: continue # Behind camera 2
             
@@ -119,8 +115,9 @@ def get_gt_match_validity(mkpts0, depth1_path, T1, T2, K):
         
         if 0 <= u2 < W_img and 0 <= v2 < H_img:
             valid_mask[i] = True
+            gt_pts[i] = [u2, v2]
             
-    return valid_mask
+    return valid_mask, gt_pts
 
 def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
     path0 = all_imgs[img0_idx]
@@ -136,7 +133,12 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
     
     if not np.isfinite(T0).all() or not np.isfinite(T1).all(): return None
     
-    F_mat = compute_fundamental_matrix(T0, T1, K, K)
+    # Map from OpenGL format to OpenCV
+    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
+    T0_cv = T0 @ T_cv2gl
+    T1_cv = T1 @ T_cv2gl
+    
+    F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
     
     img0 = get_image_tensor(path0)
     img1 = get_image_tensor(path1)
@@ -158,8 +160,8 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
         mkpts0_v = input_data['mkpts0_f'].cpu().numpy()
         mkpts1_v = input_data['mkpts1_f'].cpu().numpy()
         
-    valid_mask_v = get_gt_match_validity(mkpts0_v, depth0_path, T0, T1, K)
-    mkpts0_v, mkpts1_v = mkpts0_v[valid_mask_v], mkpts1_v[valid_mask_v]
+    valid_mask_v, gt_mkpts1_v = get_gt_matches(mkpts0_v, depth0_path, T0, T1, K)
+    mkpts0_v, mkpts1_v, gt_mkpts1_v = mkpts0_v[valid_mask_v], mkpts1_v[valid_mask_v], gt_mkpts1_v[valid_mask_v]
     
     # Skip pairs with zero valid matches across both
     if len(mkpts0_v) == 0: return None
@@ -172,11 +174,11 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
         mkpts0_c = input_data['mkpts0_f'].cpu().numpy()
         mkpts1_c = input_data['mkpts1_f'].cpu().numpy()
         
-    valid_mask_c = get_gt_match_validity(mkpts0_c, depth0_path, T0, T1, K)
-    mkpts0_c, mkpts1_c = mkpts0_c[valid_mask_c], mkpts1_c[valid_mask_c]
+    valid_mask_c, gt_mkpts1_c = get_gt_matches(mkpts0_c, depth0_path, T0, T1, K)
+    mkpts0_c, mkpts1_c, gt_mkpts1_c = mkpts0_c[valid_mask_c], mkpts1_c[valid_mask_c], gt_mkpts1_c[valid_mask_c]
     
-    errs_v = compute_epipolar_errors(mkpts0_v, mkpts1_v, F_mat)
-    errs_c = compute_epipolar_errors(mkpts0_c, mkpts1_c, F_mat)
+    errs_v = compute_gt_errors(mkpts1_v, gt_mkpts1_v)
+    errs_c = compute_gt_errors(mkpts1_c, gt_mkpts1_c)
     
     return {
         'v_total': len(errs_v),
