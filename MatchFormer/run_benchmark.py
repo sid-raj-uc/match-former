@@ -182,11 +182,13 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
     
     return {
         'v_total': len(errs_v),
-        'v_p3': np.mean(errs_v < 3.0) if len(errs_v)>0 else 0,
-        'v_p5': np.mean(errs_v < 5.0) if len(errs_v)>0 else 0,
+        'v_mean_err': np.mean(errs_v) if len(errs_v) > 0 else 0,
+        'v_p3': np.mean(errs_v < 3.0) if len(errs_v) > 0 else 0,
+        'v_p5': np.mean(errs_v < 5.0) if len(errs_v) > 0 else 0,
         'c_total': len(errs_c),
-        'c_p3': np.mean(errs_c < 3.0) if len(errs_c)>0 else 0,
-        'c_p5': np.mean(errs_c < 5.0) if len(errs_c)>0 else 0,
+        'c_mean_err': np.mean(errs_c) if len(errs_c) > 0 else 0,
+        'c_p3': np.mean(errs_c < 3.0) if len(errs_c) > 0 else 0,
+        'c_p5': np.mean(errs_c < 5.0) if len(errs_c) > 0 else 0,
     }
 
 def main():
@@ -242,17 +244,19 @@ def main():
                 break
         pbar.close()
         
+        v_mean_err = np.mean([r['v_mean_err'] for r in results])
         v_p3 = np.mean([r['v_p3'] for r in results])
         v_p5 = np.mean([r['v_p5'] for r in results])
         v_tot = np.mean([r['v_total'] for r in results])
 
+        c_mean_err = np.mean([r['c_mean_err'] for r in results])
         c_p3 = np.mean([r['c_p3'] for r in results])
         c_p5 = np.mean([r['c_p5'] for r in results])
         c_tot = np.mean([r['c_total'] for r in results])
         
         results_by_tau[tau] = {
-            'v_p3': v_p3, 'v_p5': v_p5, 'v_tot': v_tot,
-            'c_p3': c_p3, 'c_p5': c_p5, 'c_tot': c_tot
+            'v_mean_err': v_mean_err, 'v_p3': v_p3, 'v_p5': v_p5, 'v_tot': v_tot,
+            'c_mean_err': c_mean_err, 'c_p3': c_p3, 'c_p5': c_p5, 'c_tot': c_tot
         }
         
     print("\n" + "="*50)
@@ -261,17 +265,18 @@ def main():
     # The vanilla performance shouldn't change with tau, just take the first
     v_perf = results_by_tau[tau_values[0]]
     print(f"VANILLA MODEL:")
+    print(f"Mean GT Error:   {v_perf['v_mean_err']:.2f} px")
     print(f"Precision @ 3px: {v_perf['v_p3']:.2%}")
     print(f"Precision @ 5px: {v_perf['v_p5']:.2%}")
     print(f"Avg Matches:     {v_perf['v_tot']:.1f}")
-    print("-" * 50)
+    print("-" * 60)
     print("CONSTRAINED MODEL PERFORMANCE SWEEP:")
-    print(f"{'Tau':<8} | {'P@3px':<10} | {'P@5px':<10} | {'Avg Matches'}")
-    print("-" * 50)
+    print(f"{'Tau':<8} | {'Mean Err (px)':<15} | {'P@3px':<10} | {'P@5px':<10} | {'Avg Matches'}")
+    print("-" * 60)
     for tau in tau_values:
         perf = results_by_tau[tau]
-        print(f"{tau:<8} | {perf['c_p3']:.2%}   | {perf['c_p5']:.2%}   | {perf['c_tot']:.1f}")
-    print("="*50)
+        print(f"{tau:<8} | {perf['c_mean_err']:<15.2f} | {perf['c_p3']:.2%}   | {perf['c_p5']:.2%}   | {perf['c_tot']:.1f}")
+    print("=" * 60)
 
 if __name__ == '__main__':
     with torch.no_grad():
