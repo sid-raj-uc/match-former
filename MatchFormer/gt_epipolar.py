@@ -15,11 +15,10 @@ K = np.array([
 
 def compute_fundamental_matrix(pose1, pose2, K1, K2):
     """
-    pose1, pose2: 4x4 homogenous transformation matrices from camera to world (or vice-versa)
-    Let's assume they are Camera to World (T_wc)
-    Then T_12 (Camera 2 to Camera 1) = T_c1_w * T_w_c2 = inv(pose1) * pose2
+    pose1, pose2: 4x4 homogenous transformation matrices from camera to world (T_wc)
+    Then T_12 (Camera 1 to Camera 2) = T_w_c2 * T_c1_w = inv(pose2) @ pose1
     """
-    T_12 = np.linalg.inv(pose1) @ pose2
+    T_12 = np.linalg.inv(pose2) @ pose1
     R = T_12[:3, :3]
     t = T_12[:3, 3]
     

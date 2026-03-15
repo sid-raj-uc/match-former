@@ -14,8 +14,8 @@ import glob
 
 from config.defaultmf import get_cfg_defaults
 from model.lightning_loftr import PL_LoFTR
-from match_poses import read_trajectory, get_pose_for_image
-from gt_epipolar import compute_fundamental_matrix, K
+from gt_epipolar import compute_fundamental_matrix
+import os
 
 # --- EPIPOLAR MASK ---
 def create_epipolar_mask_flat(F, H_feat, W_feat, query_pt, H_img=480, W_img=640, tau=10.0):
@@ -74,14 +74,15 @@ def get_cross_attn_hook(name, layer, ux, uy, store_dict, F_matrix=None):
         store_dict[name] = attn_final.mean(dim=0).squeeze(0).detach().cpu()
     return hook
 
-rgb_dir = '../tum_rgb_dataset/rgb/*.png'
-all_imgs = sorted(glob.glob(rgb_dir))
-gt_file = '../tum_rgb_dataset/groundtruth.txt'
-poses = read_trajectory(gt_file)
+data_dir = '../data/scans/scene0000_00/exported'
+img_dir = f'{data_dir}/color/*.jpg'
+all_imgs = sorted(glob.glob(img_dir))
+# Use intrinsic_depth because it corresponds to the exactly 640x480 resolution we resize to.
+K = np.loadtxt(f'{data_dir}/intrinsic/intrinsic_depth.txt')[:3, :3]
 
 def get_image(path, resize=(640, 480)):
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    img_rgb = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+    img_rgb = cv2.resize(cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB), resize)
     img_rgb = cv2.resize(img_rgb, resize)
     img = cv2.resize(img, resize)
     img_tensor = torch.from_numpy(img).float() / 255.0
@@ -109,16 +110,61 @@ def draw_epipolar_line(ax, a, b, c, w=640, h=480):
     y1 = int(-(a*x1 + c) / b)
     ax.plot([x0, x1], [y0, y1], 'w--', linewidth=2, label='Epipolar Line')
 
+def get_gt_match(pt1, depth1_path, pose1, pose2, K):
+    # Load depth image
+    depth1 = cv2.imread(depth1_path, cv2.IMREAD_ANYDEPTH)
+    if depth1 is None: return None
+    
+    # Resize depth to 640x480 if not already
+    if depth1.shape != (480, 640):
+        depth1 = cv2.resize(depth1, (640, 480), interpolation=cv2.INTER_NEAREST)
+        
+    z = depth1[int(pt1[1]), int(pt1[0])] / 1000.0 # Convert mm to meters
+    if z <= 0.1 or z > 10.0: return None # Invalid depth
+    
+    # 1. Pixel to Camera 1 coordinates
+    cx, cy = K[0, 2], K[1, 2]
+    fx, fy = K[0, 0], K[1, 1]
+    x_c1 = (pt1[0] - cx) * z / fx
+    y_c1 = (pt1[1] - cy) * z / fy
+    p_c1 = np.array([x_c1, y_c1, z, 1.0])
+    
+    # 2. Camera 1 -> World -> Camera 2
+    # Poses from ScanNet are Camera-to-World (T_WC)
+    # T_12 = T_W2C @ T_C1W = inv(pose2) @ pose1
+    T_12 = np.linalg.inv(pose2) @ pose1
+    p_c2 = T_12 @ p_c1
+    
+    # 3. Camera 2 to Pixel coordinates
+    if p_c2[2] <= 0: return None # Behind camera 2
+    u2 = (p_c2[0] * fx / p_c2[2]) + cx
+    v2 = (p_c2[1] * fy / p_c2[2]) + cy
+    
+    # Check bounds
+    if 0 <= u2 < 640 and 0 <= v2 < 480:
+        return np.array([u2, v2])
+    return None
+
 def plot_triplet(img1_idx, img2_idx, query_points):
     img1_path = all_imgs[img1_idx]
     img2_path = all_imgs[img2_idx]
     img1_rgb, img1_tensor = get_image(img1_path)
     img2_rgb, img2_tensor = get_image(img2_path)
     
-    T1 = get_pose_for_image(img1_path, poses)
-    T2 = get_pose_for_image(img2_path, poses)
-    if T1 is None or T2 is None: return
+    img1_idx_num = os.path.basename(img1_path).split('.')[0]
+    img2_idx_num = os.path.basename(img2_path).split('.')[0]
+    try:
+        T1 = np.loadtxt(os.path.join(data_dir, 'pose', f'{img1_idx_num}.txt'))
+        T2 = np.loadtxt(os.path.join(data_dir, 'pose', f'{img2_idx_num}.txt'))
+    except FileNotFoundError:
+        return
+    
+    # Check if pose contains inf or nan
+    if not np.isfinite(T1).all() or not np.isfinite(T2).all(): return
+        
     F = compute_fundamental_matrix(T1, T2, K, K)
+    
+    depth1_path = os.path.join(data_dir, 'depth', f'{img1_idx_num}.png')
     
     input_data_v = {'image0': img1_tensor, 'image1': img2_tensor}
     input_data_c = {'image0': img1_tensor, 'image1': img2_tensor}
@@ -166,6 +212,9 @@ def plot_triplet(img1_idx, img2_idx, query_points):
         max_idx_c = np.unravel_index(np.argmax(heat_c_rez), heat_c_rez.shape)
         pred_c = np.array([max_idx_c[1], max_idx_c[0]])
         
+        # Compute GT Match
+        gt_match = get_gt_match((ux, uy), depth1_path, T1, T2, K)
+        
         # ----- PLOTTING -----
         fig, axes = plt.subplots(1, 3, figsize=(20, 6))
         
@@ -179,10 +228,17 @@ def plot_triplet(img1_idx, img2_idx, query_points):
         axes[1].imshow(img2_rgb)
         axes[1].imshow(heat_v_norm, cmap='jet', alpha=0.5)
         draw_epipolar_line(axes[1], a, b, c)
+        if gt_match is not None:
+             axes[1].plot(gt_match[0], gt_match[1], 'yo', markersize=12, label='Ground Truth')
         if pred_v is not None:
-             dist_v = np.abs(a*pred_v[0] + b*pred_v[1] + c) / np.sqrt(a**2 + b**2)
-             color = 'g*' if dist_v < 5.0 else 'rx'
-             axes[1].plot(pred_v[0], pred_v[1], color, markersize=12, label=f'Pred (Err: {dist_v:.1f}px)')
+             if gt_match is not None:
+                 dist_v = np.linalg.norm(pred_v - gt_match)
+                 color = 'g*' if dist_v < 10 else 'rx'
+                 axes[1].plot(pred_v[0], pred_v[1], color, markersize=12, label=f'Pred (GT Err: {dist_v:.1f}px)')
+             else:
+                 dist_v = np.abs(a*pred_v[0] + b*pred_v[1] + c) / np.sqrt(a**2 + b**2)
+                 color = 'g*' if dist_v < 5.0 else 'rx'
+                 axes[1].plot(pred_v[0], pred_v[1], color, markersize=12, label=f'Pred (Epi Err: {dist_v:.1f}px)')
         axes[1].set_title(f"Vanilla Target\\nEAR: {ear_v:.4f}")
         axes[1].legend(loc='lower right')
         axes[1].set_xlim([0, 640]); axes[1].set_ylim([480, 0])
@@ -192,10 +248,17 @@ def plot_triplet(img1_idx, img2_idx, query_points):
         axes[2].imshow(img2_rgb)
         axes[2].imshow(heat_c_norm, cmap='jet', alpha=0.5)
         draw_epipolar_line(axes[2], a, b, c)
+        if gt_match is not None:
+             axes[2].plot(gt_match[0], gt_match[1], 'yo', markersize=12, label='Ground Truth')
         if pred_c is not None:
-             dist_c = np.abs(a*pred_c[0] + b*pred_c[1] + c) / np.sqrt(a**2 + b**2)
-             color = 'g*' if dist_c < 5.0 else 'rx'
-             axes[2].plot(pred_c[0], pred_c[1], color, markersize=12, label=f'Pred (Err: {dist_c:.1f}px)')
+             if gt_match is not None:
+                 dist_c = np.linalg.norm(pred_c - gt_match)
+                 color = 'g*' if dist_c < 10 else 'rx'
+                 axes[2].plot(pred_c[0], pred_c[1], color, markersize=12, label=f'Pred (GT Err: {dist_c:.1f}px)')
+             else:
+                 dist_c = np.abs(a*pred_c[0] + b*pred_c[1] + c) / np.sqrt(a**2 + b**2)
+                 color = 'g*' if dist_c < 5.0 else 'rx'
+                 axes[2].plot(pred_c[0], pred_c[1], color, markersize=12, label=f'Pred (Epi Err: {dist_c:.1f}px)')
         axes[2].set_title(f"Our Model Target\\nEAR: {ear_c:.4f}")
         axes[2].legend(loc='lower right')
         axes[2].set_xlim([0, 640]); axes[2].set_ylim([480, 0])
@@ -220,8 +283,11 @@ while valid_pairs < 20 and attempts < 100:
     idx1 = np.random.randint(0, len(all_imgs) - 20)
     idx2 = idx1 + 20  # Keep a 20 frame baseline gap
     
-    # Check if poses exist for both
-    if get_pose_for_image(all_imgs[idx1], poses) is None or get_pose_for_image(all_imgs[idx2], poses) is None:
+    # Check if poses exist for both (by trying to load)
+    file_idx1 = os.path.basename(all_imgs[idx1]).split('.')[0]
+    file_idx2 = os.path.basename(all_imgs[idx2]).split('.')[0]
+    if not os.path.exists(os.path.join(data_dir, 'pose', f'{file_idx1}.txt')) or \\
+       not os.path.exists(os.path.join(data_dir, 'pose', f'{file_idx2}.txt')):
         continue
         
     x = np.random.randint(50, 590)
