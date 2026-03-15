@@ -1,0 +1,39 @@
+# Environments
+env/
+venv/
+.env
+.venv
+
+# Datasets and Large Data
+data/
+datasets/
+tum_rgb_dataset/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+test.ipynb
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific documents (optional, uncomment to ignore)
+# *.pdf
+# *.docx
+MatchFormer/model/weights/
