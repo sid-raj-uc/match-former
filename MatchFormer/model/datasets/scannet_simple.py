@@ -37,7 +37,7 @@ class ScanNetSimpleDataset(Dataset):
         self.img_size = img_size  # (W, H)
         self.skip_invalid_depth = skip_invalid_depth
 
-        # Load intrinsics
+        # Load intrinsics (just 1 file — fast)
         K_raw = np.loadtxt(os.path.join(data_dir, 'intrinsic', 'intrinsic_depth.txt'))
         self.K = K_raw[:3, :3].astype(np.float32)
 
@@ -47,7 +47,7 @@ class ScanNetSimpleDataset(Dataset):
             key=lambda x: int(os.path.basename(x).split('.')[0])
         )
 
-        # Build valid pairs
+        # Build valid pairs — store PATHS only, no np.loadtxt here
         self.pairs = []
         for i in range(len(color_paths) - frame_gap):
             idx0 = os.path.basename(color_paths[i]).split('.')[0]
@@ -57,22 +57,18 @@ class ScanNetSimpleDataset(Dataset):
             pose1_path = os.path.join(data_dir, 'pose', f'{idx1}.txt')
             depth0_path = os.path.join(data_dir, 'depth', f'{idx0}.png')
 
+            # Only check file existence here (fast) — poses loaded lazily
             if not os.path.exists(pose0_path) or not os.path.exists(pose1_path):
                 continue
             if not os.path.exists(depth0_path):
-                continue
-
-            T0 = np.loadtxt(pose0_path).astype(np.float32)
-            T1 = np.loadtxt(pose1_path).astype(np.float32)
-            if not np.isfinite(T0).all() or not np.isfinite(T1).all():
                 continue
 
             self.pairs.append({
                 'img0_path': color_paths[i],
                 'img1_path': color_paths[i + frame_gap],
                 'depth0_path': depth0_path,
-                'T0': T0,
-                'T1': T1,
+                'pose0_path': pose0_path,
+                'pose1_path': pose1_path,
                 'idx0': idx0,
                 'idx1': idx1,
             })
@@ -86,6 +82,15 @@ class ScanNetSimpleDataset(Dataset):
     def __getitem__(self, idx):
         pair = self.pairs[idx]
         W, H = self.img_size
+
+        # Load poses lazily (only when a batch actually needs this pair)
+        T0 = np.loadtxt(pair['pose0_path']).astype(np.float32)
+        T1 = np.loadtxt(pair['pose1_path']).astype(np.float32)
+
+        # Skip invalid poses at getitem time
+        if not np.isfinite(T0).all() or not np.isfinite(T1).all():
+            # Return the next pair as fallback
+            return self.__getitem__((idx + 1) % len(self.pairs))
 
         # Load and resize images
         img0 = cv2.imread(pair['img0_path'], cv2.IMREAD_GRAYSCALE)
@@ -106,7 +111,7 @@ class ScanNetSimpleDataset(Dataset):
             'image1': torch.from_numpy(img1).unsqueeze(0),   # [1, H, W]
             'depth0': torch.from_numpy(depth0),               # [H, W]
             'K': torch.from_numpy(self.K),                    # [3, 3]
-            'T0': torch.from_numpy(pair['T0']),               # [4, 4]
-            'T1': torch.from_numpy(pair['T1']),               # [4, 4]
+            'T0': torch.from_numpy(T0),                       # [4, 4]
+            'T1': torch.from_numpy(T1),                       # [4, 4]
             'pair_names': (pair['idx0'], pair['idx1']),
         }
