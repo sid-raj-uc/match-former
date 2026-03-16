@@ -214,7 +214,7 @@ def main():
     ]
 
     trainer = pl.Trainer(
-        max_steps=args.steps if not args.overfit else 200,
+        max_steps=args.steps,   # --steps is always respected; use --steps 50 for quick overfit check
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
         log_every_n_steps=1 if args.overfit else 10,
