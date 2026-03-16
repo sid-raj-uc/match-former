@@ -164,6 +164,8 @@ def main():
                         help='Save a checkpoint every N training steps.')
     parser.add_argument('--overfit',        action='store_true',
                         help='Overfit on 5 pairs to verify pipeline correctness')
+    parser.add_argument('--precision',      default='32',
+                        help='Training precision: 32, 16-mixed, or bf16 (L4/A100 recommended)')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -225,10 +227,16 @@ def main():
         pl.callbacks.LearningRateMonitor(logging_interval='step'),
     ]
 
+    # Normalize precision flag: accept 'bf16' as alias for 'bf16-mixed'
+    precision = args.precision
+    if precision == 'bf16':
+        precision = 'bf16-mixed'
+
     trainer = pl.Trainer(
         max_steps=args.steps,   # --steps is always respected; use --steps 50 for quick overfit check
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
+        precision=precision,
         log_every_n_steps=1 if args.overfit else 10,
         # Skip validation entirely during overfitting sanity check
         limit_val_batches=0.0 if args.overfit else 1.0,
