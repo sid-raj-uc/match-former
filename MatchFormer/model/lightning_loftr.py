@@ -92,7 +92,17 @@ class PL_LoFTR(pl.LightningModule):
         return losses['loss']
 
     def validation_step(self, batch, batch_idx):
+        # We need to compute supervision first so that self.criterion works
+        from .supervision import compute_supervision
+        compute_supervision(batch, self.config)
         self.matcher(batch)
+        
+        losses = self.criterion(batch)
+        
+        self.log('val/loss',   losses['loss'],   on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/loss_c', losses['loss_c'], on_step=False, on_epoch=True)
+        self.log('val/loss_f', losses['loss_f'], on_step=False, on_epoch=True)
+
         # Compute mean GT reprojection error over predicted matches
         from gt_epipolar import compute_fundamental_matrix
         import numpy as np
@@ -100,7 +110,8 @@ class PL_LoFTR(pl.LightningModule):
         mkpts1 = batch.get('mkpts1_f')
         if mkpts0 is not None and len(mkpts0) > 0:
             self.log('val/num_matches', float(len(mkpts0)), on_epoch=True)
-        return {}
+        
+        return losses['loss']
         
     
     def _compute_metrics(self, batch):
