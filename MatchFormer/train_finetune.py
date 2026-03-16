@@ -147,7 +147,7 @@ class EpipolarFineTuner(PL_LoFTR):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir',       default='../data/scans/scene0000_00/exported')
+    parser.add_argument('--data_dir', default='../data/scans', help='Root scans dir containing scene subdirs, or single exported scene dir.')
     parser.add_argument('--ckpt',           default='model/weights/indoor-lite-LA.ckpt')
     parser.add_argument('--steps',          type=int, default=10000)
     parser.add_argument('--lr',             type=float, default=1e-4)
