@@ -220,7 +220,7 @@ def main():
         log_every_n_steps=1 if args.overfit else 10,
         # Skip validation entirely during overfitting sanity check
         limit_val_batches=0.0 if args.overfit else 1.0,
-        val_check_interval=500 if not args.overfit else 1.0,
+        val_check_interval=1.0,  # validate once per epoch (not every 500 steps — val is slow on Drive)
         callbacks=callbacks,
         enable_progress_bar=True,
         gradient_clip_val=1.0,
