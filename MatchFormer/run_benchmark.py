@@ -194,6 +194,7 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_pairs', type=int, default=100)
+    parser.add_argument('--ckpt', type=str, default='model/weights/indoor-lite-LA.ckpt')
     args = parser.parse_args()
     
     # Model Setup
@@ -205,7 +206,7 @@ def main():
     config.MATCHFORMER.COARSE.D_FFN = 192
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = PL_LoFTR(config, pretrained_ckpt='model/weights/indoor-lite-LA.ckpt')
+    model = PL_LoFTR(config, pretrained_ckpt=args.ckpt)
     model.to(device)
     model.eval()
 
