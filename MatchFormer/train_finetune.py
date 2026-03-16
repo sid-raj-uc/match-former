@@ -46,11 +46,21 @@ def get_epipolar_mask_matrix(F_mat, H0, W0, H1, W1, H_img=480, W_img=640, tau=10
     p0 = torch.stack([x0_img.flatten(), y0_img.flatten(), torch.ones(H0*W0)], dim=1).to(device)
     p1 = torch.stack([x1_img.flatten(), y1_img.flatten(), torch.ones(H1*W1)], dim=1).to(device)
     F_t = torch.tensor(F_mat, dtype=torch.float32, device=device)
-    l_prime = p0 @ F_t.T
-    num = torch.abs(l_prime @ p1.T)
-    denom = torch.sqrt(l_prime[:, 0]**2 + l_prime[:, 1]**2).unsqueeze(1)
-    distances = num / (denom + 1e-8)
-    mask = torch.exp(-distances / tau)
+    l_prime = p0 @ F_t.T  # [N0, 3]
+    denom = torch.sqrt(l_prime[:, 0]**2 + l_prime[:, 1]**2).unsqueeze(1)  # [N0, 1]
+
+    # Chunk to avoid OOM: process CHUNK_SIZE rows of l_prime at a time
+    CHUNK_SIZE = 512
+    N0 = l_prime.shape[0]
+    mask_rows = []
+    for start in range(0, N0, CHUNK_SIZE):
+        end = min(start + CHUNK_SIZE, N0)
+        l_chunk = l_prime[start:end]          # [chunk, 3]
+        d_chunk = denom[start:end]            # [chunk, 1]
+        num_chunk = torch.abs(l_chunk @ p1.T) # [chunk, N1]
+        dist_chunk = num_chunk / (d_chunk + 1e-8)
+        mask_rows.append(torch.exp(-dist_chunk / tau))
+    mask = torch.cat(mask_rows, dim=0)  # [N0, N1]
     return mask.unsqueeze(0)  # [1, N0, N1]
 
 
