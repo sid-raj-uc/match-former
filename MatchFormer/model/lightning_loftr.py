@@ -44,7 +44,10 @@ class PL_LoFTR(pl.LightningModule):
 
         # Pretrained weights
         if pretrained_ckpt:
-            self.matcher.load_state_dict({k.replace('matcher.',''):v  for k,v in torch.load(pretrained_ckpt, map_location='cpu').items()})
+            ckpt = torch.load(pretrained_ckpt, map_location='cpu')
+            # Handle both flat state dicts and full PL checkpoints
+            state = ckpt.get('state_dict', ckpt)
+            self.matcher.load_state_dict({k.replace('matcher.',''):v for k,v in state.items() if not k.startswith(('epoch','global_step','pytorch-lightning'))})
             logger.info(f"Load '{pretrained_ckpt}' as pretrained checkpoint")
         
         # Testing
