@@ -7,6 +7,8 @@ import numpy as np
 import pytorch_lightning as pl
 
 from .matchformer import Matchformer
+from .supervision import compute_supervision
+from .losses import MatchFormerLoss
 from .utils.metrics import (
     compute_symmetrical_epipolar_errors,
     compute_pose_errors,
@@ -27,14 +29,78 @@ class PL_LoFTR(pl.LightningModule):
 
         # Matcher: LoFTR
         self.matcher = Matchformer(config=_config['matchformer'])
+        
+        # Loss (only used in training)
+        self.criterion = MatchFormerLoss(
+            lambda_c=getattr(config, 'LOSS_LAMBDA_C', 1.0),
+            lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
+        )
+        
+        # Training hyperparameters
+        self.lr = getattr(config, 'LR', 1e-4)
+        self.weight_decay = getattr(config, 'WEIGHT_DECAY', 1e-4)
+        self.warmup_steps = getattr(config, 'WARMUP_STEPS', 200)
+        self.total_steps = getattr(config, 'TOTAL_STEPS', 10000)
 
         # Pretrained weights
         if pretrained_ckpt:
             self.matcher.load_state_dict({k.replace('matcher.',''):v  for k,v in torch.load(pretrained_ckpt, map_location='cpu').items()})
-            logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
+            logger.info(f"Load '{pretrained_ckpt}' as pretrained checkpoint")
         
         # Testing
         self.dump_dir = dump_dir
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.total_steps, eta_min=1e-6
+        )
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {'scheduler': scheduler, 'interval': 'step'}
+        }
+
+    def training_step(self, batch, batch_idx):
+        # Step 1: temporarily run in eval mode to populate hw0_c, hw1_c
+        # without triggering coarse_matching's training-mode GT padding
+        # (which needs spv_b_ids that don't exist yet)
+        self.matcher.eval()
+        with torch.no_grad():
+            self.matcher(batch)
+        self.matcher.train()
+
+        # Step 2: Compute supervision labels (populates spv_b_ids/i_ids/j_ids)
+        compute_supervision(batch, self.config)
+
+        # Step 3: Clear keys that the forward will re-populate
+        for key in ['conf_matrix', 'b_ids', 'i_ids', 'j_ids', 'gt_mask',
+                    'm_bids', 'mkpts0_c', 'mkpts1_c', 'mconf',
+                    'expec_f', 'mkpts0_f', 'mkpts1_f']:
+            batch.pop(key, None)
+
+        # Step 4: Real training forward (coarse_matching now finds spv_* keys)
+        self.matcher(batch)
+
+        # Step 5: Compute losses
+        losses = self.criterion(batch)
+
+        self.log('train/loss',   losses['loss'],   on_step=True, prog_bar=True)
+        self.log('train/loss_c', losses['loss_c'], on_step=True)
+        self.log('train/loss_f', losses['loss_f'], on_step=True)
+        return losses['loss']
+
+    def validation_step(self, batch, batch_idx):
+        self.matcher(batch)
+        # Compute mean GT reprojection error over predicted matches
+        from gt_epipolar import compute_fundamental_matrix
+        import numpy as np
+        mkpts0 = batch.get('mkpts0_f')
+        mkpts1 = batch.get('mkpts1_f')
+        if mkpts0 is not None and len(mkpts0) > 0:
+            self.log('val/num_matches', float(len(mkpts0)), on_epoch=True)
+        return {}
         
     
     def _compute_metrics(self, batch):

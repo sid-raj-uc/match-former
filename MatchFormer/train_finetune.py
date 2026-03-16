@@ -1,0 +1,234 @@
+"""
+Fine-tuning launcher for epipolar-constrained MatchFormer.
+
+Trains the model with:
+  - Epipolar mask baked into CoarseMatching forward pass (inference-time)
+  - GT coarse correspondences from depth projection (supervision)
+  - Focal loss on confidence matrix + L2 on fine-level offsets
+
+Usage:
+    # Overfitting sanity check (fast, on 5 pairs, should converge in ~100 steps)
+    python train_finetune.py --overfit
+
+    # Full fine-tune
+    python train_finetune.py --steps 10000
+    
+    # Resume from checkpoint
+    python train_finetune.py --resume checkpoints/last.ckpt --steps 10000
+"""
+
+import os
+import sys
+import argparse
+import torch
+import torch.nn.functional as F
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader, random_split
+
+# ── Project imports ─────────────────────────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config.defaultmf import get_cfg_defaults
+from model.lightning_loftr import PL_LoFTR
+from model.datasets.scannet_simple import ScanNetSimpleDataset
+from model.backbone.coarse_matching import CoarseMatching
+from gt_epipolar import compute_fundamental_matrix
+
+# ── Epipolar Constraint Setup ─────────────────────────────────────────────────
+
+def get_epipolar_mask_matrix(F_mat, H0, W0, H1, W1, H_img=480, W_img=640, tau=10.0, device='cpu'):
+    y0, x0 = torch.meshgrid(torch.arange(H0), torch.arange(W0), indexing='ij')
+    x0_img = (x0.float() / W0) * W_img
+    y0_img = (y0.float() / H0) * H_img
+    y1, x1 = torch.meshgrid(torch.arange(H1), torch.arange(W1), indexing='ij')
+    x1_img = (x1.float() / W1) * W_img
+    y1_img = (y1.float() / H1) * H_img
+    
+    p0 = torch.stack([x0_img.flatten(), y0_img.flatten(), torch.ones(H0*W0)], dim=1).to(device)
+    p1 = torch.stack([x1_img.flatten(), y1_img.flatten(), torch.ones(H1*W1)], dim=1).to(device)
+    F_t = torch.tensor(F_mat, dtype=torch.float32, device=device)
+    l_prime = p0 @ F_t.T
+    num = torch.abs(l_prime @ p1.T)
+    denom = torch.sqrt(l_prime[:, 0]**2 + l_prime[:, 1]**2).unsqueeze(1)
+    distances = num / (denom + 1e-8)
+    mask = torch.exp(-distances / tau)
+    return mask.unsqueeze(0)  # [1, N0, N1]
+
+
+original_coarse_forward = CoarseMatching.forward
+
+def epipolar_coarse_forward(self, feat_c0, feat_c1, data, mask_c0=None, mask_c1=None):
+    N, L, S, C = feat_c0.size(0), feat_c0.size(1), feat_c1.size(1), feat_c0.size(2)
+    feat_c0_n = feat_c0 / feat_c0.shape[-1]**0.5
+    feat_c1_n = feat_c1 / feat_c1.shape[-1]**0.5
+    sim_matrix = torch.einsum("nlc,nsc->nls", feat_c0_n, feat_c1_n) / self.temperature
+    if mask_c0 is not None:
+        sim_matrix.masked_fill_(~(mask_c0[..., None] * mask_c1[:, None]).bool(), -1e9)
+    conf_matrix = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
+
+    if getattr(self, 'epipolar_F', None) is not None:
+        tau = getattr(self, 'epipolar_tau', 10.0)
+        H0, W0 = data['hw0_c']
+        H1, W1 = data['hw1_c']
+        epi_mask = get_epipolar_mask_matrix(self.epipolar_F, H0, W0, H1, W1, tau=tau, device=conf_matrix.device)
+        conf_matrix = conf_matrix * epi_mask
+
+    data.update({'conf_matrix': conf_matrix})
+    data.update(**self.get_coarse_match(conf_matrix, data))
+
+CoarseMatching.forward = epipolar_coarse_forward
+
+
+# ── Collate function ─────────────────────────────────────────────────────────
+
+def collate_fn(batch):
+    """Collate a list of dataset items into a batch dict."""
+    keys = batch[0].keys()
+    out = {}
+    for k in keys:
+        if k == 'pair_names':
+            out[k] = [b[k] for b in batch]
+        else:
+            out[k] = torch.stack([b[k] for b in batch])
+    return out
+
+
+# ── Training with per-batch epipolar F injection ──────────────────────────────
+
+class EpipolarFineTuner(PL_LoFTR):
+    """
+    Extends PL_LoFTR with per-batch epipolar F matrix computation.
+    Before each forward pass in training, we compute F from the batch poses
+    and inject it into CoarseMatching.
+    """
+    def __init__(self, config, pretrained_ckpt=None, tau=10.0):
+        super().__init__(config, pretrained_ckpt=pretrained_ckpt)
+        self.tau = tau
+        self.T_cv2gl = torch.tensor([
+            [1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]
+        ], dtype=torch.float32)
+
+    def _inject_epipolar(self, batch):
+        """Compute F from first item in batch and inject into coarse_matching."""
+        T0 = batch['T0'][0].cpu().numpy()
+        T1 = batch['T1'][0].cpu().numpy()
+        K  = batch['K'][0].cpu().numpy()
+        T_gl = self.T_cv2gl.numpy()
+        T0_cv = T0 @ T_gl
+        T1_cv = T1 @ T_gl
+        try:
+            F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
+            self.matcher.coarse_matching.epipolar_F = F_mat
+            self.matcher.coarse_matching.epipolar_tau = self.tau
+        except Exception:
+            self.matcher.coarse_matching.epipolar_F = None
+
+    def training_step(self, batch, batch_idx):
+        self._inject_epipolar(batch)
+        return super().training_step(batch, batch_idx)
+
+    def validation_step(self, batch, batch_idx):
+        self._inject_epipolar(batch)
+        return super().validation_step(batch, batch_idx)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir',       default='../data/scans/scene0000_00/exported')
+    parser.add_argument('--ckpt',           default='model/weights/indoor-lite-LA.ckpt')
+    parser.add_argument('--steps',          type=int, default=10000)
+    parser.add_argument('--lr',             type=float, default=1e-4)
+    parser.add_argument('--tau',            type=float, default=10.0)
+    parser.add_argument('--batch',          type=int, default=2)
+    parser.add_argument('--workers',        type=int, default=2)
+    parser.add_argument('--frame_gap',      type=int, default=20)
+    parser.add_argument('--resume',         default=None,
+                        help='Path to checkpoint to resume from. If not set, '
+                             'auto-resumes from last.ckpt in --checkpoint_dir if it exists.')
+    parser.add_argument('--checkpoint_dir', default='checkpoints/',
+                        help='Directory to save checkpoints. Set to a Google Drive path on Colab.')
+    parser.add_argument('--save_every',     type=int, default=500,
+                        help='Save a checkpoint every N training steps.')
+    parser.add_argument('--overfit',        action='store_true',
+                        help='Overfit on 5 pairs to verify pipeline correctness')
+    args = parser.parse_args()
+
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+    # ── Auto-resume from last checkpoint ─────────────────────────────────────
+    resume_path = args.resume
+    if resume_path is None:
+        last_ckpt = os.path.join(args.checkpoint_dir, 'last.ckpt')
+        if os.path.exists(last_ckpt):
+            resume_path = last_ckpt
+            print(f"[Auto-resume] Found checkpoint: {last_ckpt}")
+        else:
+            print("[Auto-resume] No checkpoint found — starting from scratch.")
+
+    # ── Config ──────────────────────────────────────────────────────────────
+    config = get_cfg_defaults()
+    config.MATCHFORMER.BACKBONE_TYPE = 'litela'
+    config.MATCHFORMER.SCENS = 'indoor'
+    config.MATCHFORMER.RESOLUTION = (8, 4)
+    config.MATCHFORMER.COARSE.D_MODEL = 192
+    config.MATCHFORMER.COARSE.D_FFN = 192
+    config.LR           = args.lr
+    config.TOTAL_STEPS  = args.steps
+    config.LOSS_LAMBDA_C = 1.0
+    config.LOSS_LAMBDA_F = 0.5
+
+    # ── Dataset ─────────────────────────────────────────────────────────────
+    max_pairs = 5 if args.overfit else None
+    dataset = ScanNetSimpleDataset(
+        args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs
+    )
+    print(f"Dataset: {len(dataset)} pairs")
+
+    if args.overfit:
+        train_ds, val_ds = dataset, dataset
+    else:
+        n_val = max(1, int(len(dataset) * 0.1))
+        n_train = len(dataset) - n_val
+        train_ds, val_ds = random_split(dataset, [n_train, n_val])
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
+                              num_workers=args.workers, collate_fn=collate_fn,
+                              pin_memory=True, drop_last=True)
+    val_loader   = DataLoader(val_ds,   batch_size=1,          shuffle=False,
+                              num_workers=0, collate_fn=collate_fn)
+
+    # ── Model ────────────────────────────────────────────────────────────────
+    model = EpipolarFineTuner(config, pretrained_ckpt=args.ckpt, tau=args.tau)
+
+    # ── Callbacks & Trainer ──────────────────────────────────────────────────
+    callbacks = [
+        pl.callbacks.ModelCheckpoint(
+            dirpath=args.checkpoint_dir,
+            filename='epipolar-{step:05d}',
+            every_n_train_steps=args.save_every,
+            save_last=True,
+            save_top_k=-1,   # keep all periodic checkpoints
+        ),
+        pl.callbacks.LearningRateMonitor(logging_interval='step'),
+    ]
+
+    trainer = pl.Trainer(
+        max_steps=args.steps if not args.overfit else 200,
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        devices=1,
+        log_every_n_steps=1 if args.overfit else 10,
+        # Skip validation entirely during overfitting sanity check
+        limit_val_batches=0.0 if args.overfit else 1.0,
+        val_check_interval=500 if not args.overfit else 1.0,
+        callbacks=callbacks,
+        enable_progress_bar=True,
+        gradient_clip_val=1.0,
+    )
+
+    trainer.fit(model, train_loader, val_loader, ckpt_path=resume_path)
+    print(f"Training complete. Checkpoints saved to {args.checkpoint_dir}")
+
+
+if __name__ == '__main__':
+    main()
