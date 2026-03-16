@@ -38,3 +38,4 @@ Thumbs.db
 # *.docx
 MatchFormer/model/weights/!MatchFormer/model/datasets/
 MatchFormer/model/weights/*.ckpt
+MatchFormer/lightning_logs/
