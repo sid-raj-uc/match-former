@@ -36,4 +36,4 @@ Thumbs.db
 # Project specific documents (optional, uncomment to ignore)
 # *.pdf
 # *.docx
-MatchFormer/model/weights/
+MatchFormer/model/weights/!MatchFormer/model/datasets/
