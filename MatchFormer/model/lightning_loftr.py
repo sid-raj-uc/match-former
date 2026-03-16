@@ -86,9 +86,9 @@ class PL_LoFTR(pl.LightningModule):
         # Step 5: Compute losses
         losses = self.criterion(batch)
 
-        self.log('train/loss',   losses['loss'],   on_step=True, prog_bar=True)
-        self.log('train/loss_c', losses['loss_c'], on_step=True)
-        self.log('train/loss_f', losses['loss_f'], on_step=True)
+        self.log('train/loss',   losses['loss'],   on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
+        self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
         return losses['loss']
 
     def validation_step(self, batch, batch_idx):
