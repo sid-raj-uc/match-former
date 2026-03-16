@@ -114,4 +114,6 @@ class ScanNetSimpleDataset(Dataset):
             'T0': torch.from_numpy(T0),                       # [4, 4]
             'T1': torch.from_numpy(T1),                       # [4, 4]
             'pair_names': (pair['idx0'], pair['idx1']),
+            'hw0_i': (H, W),
+            'hw0_c': (H // 8, W // 8),
         }

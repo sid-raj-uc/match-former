@@ -95,8 +95,10 @@ def collate_fn(batch):
     keys = batch[0].keys()
     out = {}
     for k in keys:
-        if k == 'pair_names':
+        if k in ['pair_names', 'hw0_i', 'hw0_c']:
             out[k] = [b[k] for b in batch]
+            if k in ['hw0_i', 'hw0_c']:
+                out[k] = out[k][0] # Just take the first one since all images in a batch are resized to the same dimensions
         else:
             out[k] = torch.stack([b[k] for b in batch])
     return out
