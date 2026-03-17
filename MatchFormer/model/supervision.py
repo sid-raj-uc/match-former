@@ -81,7 +81,7 @@ def compute_supervision(data, config):
         T1_cv = T1[b] @ T_gl   # [4, 4]
 
         # Relative transform: Camera 0 -> World -> Camera 1
-        T_12 = torch.linalg.inv(T1_cv) @ T0_cv  # [4, 4]
+        T_12 = torch.linalg.inv(T1_cv.float()) @ T0_cv.float()  # [4, 4]
 
         # Transform points to Camera 1
         pts_c1 = (T_12 @ pts_c0.T).T  # [M, 4]
