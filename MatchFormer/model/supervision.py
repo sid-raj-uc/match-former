@@ -1,16 +1,3 @@
-"""
-Supervision module: generates GT coarse-level correspondences from depth + pose.
-
-For each coarse grid position in Image 0 that has valid depth, this module:
-  1. Unprojects the pixel to 3D in Camera 0 space
-  2. Transforms to Camera 1 space using the relative pose
-  3. Projects to the coarse grid of Image 1
-  4. Records valid (b, i, j) indices as GT supervision labels
-
-These are stored as 'spv_b_ids', 'spv_i_ids', 'spv_j_ids' in the data dict,
-which is exactly what CoarseMatching.get_coarse_match() expects during training.
-"""
-
 import torch
 import numpy as np
 

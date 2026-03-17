@@ -1,16 +1,3 @@
-"""
-Loss functions for fine-tuning MatchFormer with epipolar supervision.
-
-L_coarse: Focal loss on the coarse confidence matrix.
-    - Positive positions: GT match cells (spv_b_ids, spv_i_ids, spv_j_ids)
-    - Everything else: negative
-    
-L_fine: L2 loss on fine-level sub-pixel offset prediction.
-    - Only applied to GT-padded matches
-
-Total: L = lambda_c * L_coarse + lambda_f * L_fine
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

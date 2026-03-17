@@ -104,11 +104,6 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.seed = config.TRAINER.SEED  # 66
 
     def setup(self, stage=None):
-        """
-        Setup train / val / test dataset. This method will be called by PL automatically.
-        Args:
-            stage (str): 'fit' in training phase, and 'test' in testing phase.
-        """
 
         assert stage in ['fit', 'test'], "stage must be either fit or test"
 

@@ -172,7 +172,6 @@ def epidist_prec(errors, thresholds, ret_dict=False):
 
 def aggregate_metrics(metrics, epi_err_thr=5e-4):
     """ Aggregate metrics for the whole dataset:
-    (This method should be called once per dataset)
     1. AUC of the pose error (angular) at the threshold [5, 10, 20]
     2. Mean matching precision at the threshold 5e-4(ScanNet), 1e-4(MegaDepth)
     """
