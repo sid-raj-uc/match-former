@@ -77,47 +77,34 @@ def compute_gt_errors(mkpts1, gt_mkpts1):
     return np.linalg.norm(mkpts1 - gt_mkpts1, axis=1)
 
 def get_gt_matches(mkpts0, depth1_path, T1, T2, K):
-    """
-    Project points from image 1 to image 2 based on depth.
-    Return mask of valid matched points and their coordinates.
-    """
     depth = cv2.imread(depth1_path, cv2.IMREAD_UNCHANGED)
     if depth is None: return np.zeros(len(mkpts0), dtype=bool), np.zeros_like(mkpts0)
-    
-    # Scale depth identical to projection map
-    depth = (depth.astype(float) / 1000.0)
-    
-    valid_mask = np.zeros(len(mkpts0), dtype=bool)
-    gt_pts = np.zeros_like(mkpts0)
-    for i, pt in enumerate(mkpts0):
-        # Sample Depth from Nearest Neighbor (ensure bounds)
-        x_idx, y_idx = int(round(pt[0])), int(round(pt[1]))
-        if y_idx >= depth.shape[0] or x_idx >= depth.shape[1] or y_idx < 0 or x_idx < 0: continue
-            
-        z = depth[y_idx, x_idx]
-        if z <= 0.1 or z > 10.0: continue # Invalid Depth Range
-        
-        # 3D projection
-        fx, fy = K[0, 0], K[1, 1]
-        cx, cy = K[0, 2], K[1, 2]
-        x_c1 = (pt[0] - cx) * z / fx
-        y_c1 = (pt[1] - cy) * z / fy
-        p_c1 = np.array([x_c1, y_c1, z, 1.0])
-        
-        # Transform
-        T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-        T_12 = T_cv2gl @ np.linalg.inv(T2) @ T1 @ T_cv2gl
-        p_c2 = T_12 @ p_c1
-        if p_c2[2] <= 0: continue # Behind camera 2
-            
-        u2 = (p_c2[0] * fx / p_c2[2]) + cx
-        v2 = (p_c2[1] * fy / p_c2[2]) + cy
-        
-        if 0 <= u2 < W_img and 0 <= v2 < H_img:
-            valid_mask[i] = True
-            gt_pts[i] = [u2, v2]
-            
-    return valid_mask, gt_pts
+    depth = depth.astype(np.float32) / 1000.0
+
+    fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]], dtype=np.float64)
+    T_12 = T_cv2gl @ np.linalg.inv(T2) @ T1 @ T_cv2gl  # compute once
+
+    x_idx = np.round(mkpts0[:, 0]).astype(int)
+    y_idx = np.round(mkpts0[:, 1]).astype(int)
+
+    valid = (x_idx >= 0) & (x_idx < depth.shape[1]) & (y_idx >= 0) & (y_idx < depth.shape[0])
+    z = np.zeros(len(mkpts0), dtype=np.float32)
+    z[valid] = depth[y_idx[valid], x_idx[valid]]
+    valid &= (z > 0.1) & (z <= 10.0)
+
+    x_c = (mkpts0[:, 0] - cx) * z / fx
+    y_c = (mkpts0[:, 1] - cy) * z / fy
+    pts_h = np.stack([x_c, y_c, z, np.ones(len(mkpts0))], axis=1)  # [N, 4]
+    pts_c2 = (T_12 @ pts_h.T).T  # [N, 4]
+
+    valid &= pts_c2[:, 2] > 0
+    u2 = np.where(valid, pts_c2[:, 0] * fx / np.where(valid, pts_c2[:, 2], 1) + cx, 0)
+    v2 = np.where(valid, pts_c2[:, 1] * fy / np.where(valid, pts_c2[:, 2], 1) + cy, 0)
+    valid &= (u2 >= 0) & (u2 < W_img) & (v2 >= 0) & (v2 < H_img)
+
+    gt_pts = np.stack([u2, v2], axis=1)
+    return valid, gt_pts
 
 def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, device='cpu'):
     path0 = all_imgs[img0_idx]
