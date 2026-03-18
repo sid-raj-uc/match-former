@@ -195,8 +195,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_pairs', type=int, default=100)
     parser.add_argument('--ckpt', type=str, default='model/weights/indoor-lite-LA.ckpt')
+    parser.add_argument('--data_dir', type=str, default='../data/scans/scene0000_00/exported')
+    parser.add_argument('--test_only', action='store_true',
+                        help='Evaluate on last 10%% of frames only (held-out test split)')
     args = parser.parse_args()
-    
+
     # Model Setup
     config = get_cfg_defaults()
     config.MATCHFORMER.BACKBONE_TYPE = 'litela'
@@ -211,9 +214,14 @@ def main():
     model.eval()
 
     # Data Setup
-    data_dir = '../data/scans/scene0000_00/exported'
+    data_dir = args.data_dir
     color_dir = os.path.join(data_dir, 'color', '*.jpg')
     all_imgs = sorted(glob.glob(color_dir), key=lambda x: int(os.path.basename(x).split('.')[0]))
+
+    if args.test_only:
+        n_test = max(1, int(len(all_imgs) * 0.1))
+        all_imgs = all_imgs[-n_test:]
+        print(f'Test-only mode: using last {len(all_imgs)} frames')
 
     K = np.loadtxt(os.path.join(data_dir, 'intrinsic', 'intrinsic_depth.txt'))[:3, :3]
     
