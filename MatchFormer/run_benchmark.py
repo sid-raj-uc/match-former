@@ -119,77 +119,75 @@ def get_gt_matches(mkpts0, depth1_path, T1, T2, K):
             
     return valid_mask, gt_pts
 
-def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau):
+def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, device='cpu'):
     path0 = all_imgs[img0_idx]
     path1 = all_imgs[img1_idx]
-    
+
     img0_idx_num = os.path.basename(path0).split('.')[0]
     img1_idx_num = os.path.basename(path1).split('.')[0]
-    
+
     try:
         T0 = np.loadtxt(os.path.join(data_dir, 'pose', f'{img0_idx_num}.txt'))
         T1 = np.loadtxt(os.path.join(data_dir, 'pose', f'{img1_idx_num}.txt'))
     except FileNotFoundError: return None
-    
+
     if not np.isfinite(T0).all() or not np.isfinite(T1).all(): return None
-    
-    # Map from OpenGL format to OpenCV
+
     T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
     T0_cv = T0 @ T_cv2gl
     T1_cv = T1 @ T_cv2gl
-    
     F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
-    
+
     img0 = get_image_tensor(path0)
     img1 = get_image_tensor(path1)
     if img0 is None or img1 is None: return None
-    
+
     depth0_path = os.path.join(data_dir, 'depth', f'{img0_idx_num}.png')
-    
-    input_data = {'image0': img0, 'image1': img1}
-    
-    # Evaluate Validation Mask BEFORE constraint vs Vanilla.
-    # To be perfectly fair, we only evaluate epipolar error on matches where a GT Point EXISTS
-    # Meaning, the scene overlaps and depth is valid. 
-    # If the network predicts a match for a ray that has no geometry, it's out of bounds and ambiguous. 
-    
-    # 1. RUN VANILLA
+    input_data = {'image0': img0.to(device), 'image1': img1.to(device)}
+
+    # Run vanilla once
     model.matcher.coarse_matching.epipolar_F = None
     with torch.no_grad():
         model.matcher(input_data)
         mkpts0_v = input_data['mkpts0_f'].cpu().numpy()
         mkpts1_v = input_data['mkpts1_f'].cpu().numpy()
-        
+
     valid_mask_v, gt_mkpts1_v = get_gt_matches(mkpts0_v, depth0_path, T0, T1, K)
-    mkpts0_v, mkpts1_v, gt_mkpts1_v = mkpts0_v[valid_mask_v], mkpts1_v[valid_mask_v], gt_mkpts1_v[valid_mask_v]
-    
-    # Skip pairs with zero valid matches across both
+    mkpts0_v = mkpts0_v[valid_mask_v]
+    mkpts1_v = mkpts1_v[valid_mask_v]
+    gt_mkpts1_v = gt_mkpts1_v[valid_mask_v]
     if len(mkpts0_v) == 0: return None
-        
-    # 2. RUN CONSTRAINED
-    model.matcher.coarse_matching.epipolar_F = F_mat
-    model.matcher.coarse_matching.epipolar_tau = tau
-    with torch.no_grad():
-        model.matcher(input_data)
-        mkpts0_c = input_data['mkpts0_f'].cpu().numpy()
-        mkpts1_c = input_data['mkpts1_f'].cpu().numpy()
-        
-    valid_mask_c, gt_mkpts1_c = get_gt_matches(mkpts0_c, depth0_path, T0, T1, K)
-    mkpts0_c, mkpts1_c, gt_mkpts1_c = mkpts0_c[valid_mask_c], mkpts1_c[valid_mask_c], gt_mkpts1_c[valid_mask_c]
-    
+
     errs_v = compute_gt_errors(mkpts1_v, gt_mkpts1_v)
-    errs_c = compute_gt_errors(mkpts1_c, gt_mkpts1_c)
-    
-    return {
+    vanilla = {
         'v_total': len(errs_v),
         'v_mean_err': np.mean(errs_v) if len(errs_v) > 0 else 0,
         'v_p3': np.mean(errs_v < 3.0) if len(errs_v) > 0 else 0,
         'v_p5': np.mean(errs_v < 5.0) if len(errs_v) > 0 else 0,
-        'c_total': len(errs_c),
-        'c_mean_err': np.mean(errs_c) if len(errs_c) > 0 else 0,
-        'c_p3': np.mean(errs_c < 3.0) if len(errs_c) > 0 else 0,
-        'c_p5': np.mean(errs_c < 5.0) if len(errs_c) > 0 else 0,
     }
+
+    # Sweep all taus in one pass per pair
+    results_by_tau = {}
+    for tau in tau_values:
+        model.matcher.coarse_matching.epipolar_F = F_mat
+        model.matcher.coarse_matching.epipolar_tau = tau
+        with torch.no_grad():
+            model.matcher(input_data)
+            mkpts0_c = input_data['mkpts0_f'].cpu().numpy()
+            mkpts1_c = input_data['mkpts1_f'].cpu().numpy()
+
+        valid_mask_c, gt_mkpts1_c = get_gt_matches(mkpts0_c, depth0_path, T0, T1, K)
+        mkpts1_c = mkpts1_c[valid_mask_c]
+        gt_mkpts1_c = gt_mkpts1_c[valid_mask_c]
+        errs_c = compute_gt_errors(mkpts1_c, gt_mkpts1_c)
+        results_by_tau[tau] = {
+            'c_total': len(errs_c),
+            'c_mean_err': np.mean(errs_c) if len(errs_c) > 0 else 0,
+            'c_p3': np.mean(errs_c < 3.0) if len(errs_c) > 0 else 0,
+            'c_p5': np.mean(errs_c < 5.0) if len(errs_c) > 0 else 0,
+        }
+
+    return {'vanilla': vanilla, 'by_tau': results_by_tau}
 
 def main():
     parser = argparse.ArgumentParser()
@@ -208,7 +206,12 @@ def main():
     config.MATCHFORMER.COARSE.D_MODEL = 192
     config.MATCHFORMER.COARSE.D_FFN = 192
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
     model = PL_LoFTR(config, pretrained_ckpt=args.ckpt)
     model.to(device)
     model.eval()
@@ -226,46 +229,38 @@ def main():
     K = np.loadtxt(os.path.join(data_dir, 'intrinsic', 'intrinsic_depth.txt'))[:3, :3]
     
     tau_values = [50.0, 20.0, 10.0, 5.0, 2.0]
-    
-    results_by_tau = {}
-    
-    print(f"--- Running ScanNet Benchmark for {args.num_pairs} Pairs ---")
-    
-    # To make sure we hit 100 pairs, we'll keep iterating until we collect enough valid ones
-    # A valid pair is one separated by at least 20 frames that has overlapping geometry
-    
-    for tau in tau_values:
-        print(f"\nEvaluating Tau={tau}...")
-        results = []
-        pair_gap = 20
-        idx = 0
-        
-        pbar = tqdm(total=args.num_pairs)
-        while len(results) < args.num_pairs and idx < len(all_imgs) - pair_gap:
-            res = evaluate_pair(idx, idx + pair_gap, all_imgs, data_dir, K, model, tau)
-            if res is not None:
-                results.append(res)
-                pbar.update(1)
-                
-            idx += 1
-            if idx >= len(all_imgs) - pair_gap:
-                print("Warning: Ran out of images before reaching pair quota.")
-                break
-        pbar.close()
-        
-        v_mean_err = np.mean([r['v_mean_err'] for r in results])
-        v_p3 = np.mean([r['v_p3'] for r in results])
-        v_p5 = np.mean([r['v_p5'] for r in results])
-        v_tot = np.mean([r['v_total'] for r in results])
+    pair_gap = 20
+    results = []
+    idx = 0
 
-        c_mean_err = np.mean([r['c_mean_err'] for r in results])
-        c_p3 = np.mean([r['c_p3'] for r in results])
-        c_p5 = np.mean([r['c_p5'] for r in results])
-        c_tot = np.mean([r['c_total'] for r in results])
-        
+    print(f"--- Running ScanNet Benchmark for {args.num_pairs} Pairs ---")
+    pbar = tqdm(total=args.num_pairs, desc='Pairs', unit='pair')
+    while len(results) < args.num_pairs and idx < len(all_imgs) - pair_gap:
+        res = evaluate_pair(idx, idx + pair_gap, all_imgs, data_dir, K, model, tau_values, device=device)
+        if res is not None:
+            results.append(res)
+            v_p3 = np.mean([r['vanilla']['v_p3'] for r in results])
+            c_p3 = np.mean([r['by_tau'][tau_values[0]]['c_p3'] for r in results])
+            pbar.set_postfix({'vanilla_p3': f'{v_p3:.2%}', 'constrained_p3': f'{c_p3:.2%}'})
+            pbar.update(1)
+        idx += 1
+    pbar.close()
+
+    if not results:
+        print("No valid pairs found.")
+        return
+
+    results_by_tau = {}
+    for tau in tau_values:
         results_by_tau[tau] = {
-            'v_mean_err': v_mean_err, 'v_p3': v_p3, 'v_p5': v_p5, 'v_tot': v_tot,
-            'c_mean_err': c_mean_err, 'c_p3': c_p3, 'c_p5': c_p5, 'c_tot': c_tot
+            'v_mean_err': np.mean([r['vanilla']['v_mean_err'] for r in results]),
+            'v_p3':       np.mean([r['vanilla']['v_p3']       for r in results]),
+            'v_p5':       np.mean([r['vanilla']['v_p5']       for r in results]),
+            'v_tot':      np.mean([r['vanilla']['v_total']    for r in results]),
+            'c_mean_err': np.mean([r['by_tau'][tau]['c_mean_err'] for r in results]),
+            'c_p3':       np.mean([r['by_tau'][tau]['c_p3']       for r in results]),
+            'c_p5':       np.mean([r['by_tau'][tau]['c_p5']       for r in results]),
+            'c_tot':      np.mean([r['by_tau'][tau]['c_total']    for r in results]),
         }
         
     print("\n" + "="*50)

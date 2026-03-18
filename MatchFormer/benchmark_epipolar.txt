@@ -1,10 +1,7 @@
-objc[97052]: Class AVFFrameReceiver is implemented in both /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/cv2/.dylibs/libavdevice.61.3.100.dylib (0x1095983a8) and /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/av/.dylibs/libavdevice.62.1.100.dylib (0x119b543a8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
-objc[97052]: Class AVFAudioReceiver is implemented in both /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/cv2/.dylibs/libavdevice.61.3.100.dylib (0x1095983f8) and /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/av/.dylibs/libavdevice.62.1.100.dylib (0x119b543f8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+objc[7027]: Class AVFFrameReceiver is implemented in both /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/cv2/.dylibs/libavdevice.61.3.100.dylib (0x10b60c3a8) and /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/av/.dylibs/libavdevice.62.1.100.dylib (0x11bd503a8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+objc[7027]: Class AVFAudioReceiver is implemented in both /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/cv2/.dylibs/libavdevice.61.3.100.dylib (0x10b60c3f8) and /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/av/.dylibs/libavdevice.62.1.100.dylib (0x11bd503f8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
 /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
   warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
-2026-03-18 00:06:30.715 | INFO     | model.lightning_loftr:__init__:50 - Load 'model/weights/epipolar-model.ckpt' as pretrained checkpoint
+2026-03-18 14:41:28.180 | INFO     | model.lightning_loftr:__init__:50 - Load 'model/weights/epipolar-model.ckpt' as pretrained checkpoint
 --- Running ScanNet Benchmark for 100 Pairs ---
-
-Evaluating Tau=50.0...
-  0%|          | 0/100 [00:00<?, ?it/s]/opt/homebrew/Cellar/python@3.12/3.12.12/Frameworks/Python.framework/Versions/3.12/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-  warnings.warn('resource_tracker: There appear to be %d '
+Pairs:   0%|          | 0/100 [00:00<?, ?pair/s]
