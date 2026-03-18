@@ -18,6 +18,8 @@ Usage:
 """
 
 import os
+import re
+import glob
 import sys
 import argparse
 import torch
@@ -170,15 +172,21 @@ def main():
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    # ── Auto-resume from last checkpoint ─────────────────────────────────────
+    # ── Auto-resume: prefer highest epipolar-N.ckpt, fall back to last.ckpt ───
     resume_path = args.resume
     if resume_path is None:
-        last_ckpt = os.path.join(args.checkpoint_dir, 'last.ckpt')
-        if os.path.exists(last_ckpt):
-            resume_path = last_ckpt
-            print(f"[Auto-resume] Found checkpoint: {last_ckpt}")
+        step_ckpts = [p for p in glob.glob(os.path.join(args.checkpoint_dir, 'epipolar-*.ckpt'))
+                      if re.search(r'epipolar-step=(\d+)\.ckpt', p)]
+        if step_ckpts:
+            resume_path = max(step_ckpts, key=lambda p: int(re.search(r'epipolar-step=(\d+)', p).group(1)))
+            print(f"[Auto-resume] Resuming from: {resume_path}")
         else:
-            print("[Auto-resume] No checkpoint found — starting from scratch.")
+            last_ckpt = os.path.join(args.checkpoint_dir, 'last.ckpt')
+            if os.path.exists(last_ckpt):
+                resume_path = last_ckpt
+                print(f"[Auto-resume] Resuming from: {resume_path}")
+            else:
+                print("[Auto-resume] No checkpoint found — starting from scratch.")
 
     # ── Config ──────────────────────────────────────────────────────────────
     config = get_cfg_defaults()
