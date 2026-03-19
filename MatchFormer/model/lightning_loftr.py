@@ -78,6 +78,12 @@ class PL_LoFTR(pl.LightningModule):
             self.matcher(batch)
         self.matcher.train()
 
+        # Save eval-pass conf_matrix as reference for KL regularization
+        # before step 3 clears it.  This is the model's current inference
+        # distribution — KL(ref || train) keeps train mode close to it.
+        if 'conf_matrix' in batch:
+            batch['ref_conf_matrix'] = batch['conf_matrix'].detach().clone()
+
         # Step 2: Compute supervision labels (populates spv_b_ids/i_ids/j_ids)
         compute_supervision(batch, self.config)
 
