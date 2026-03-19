@@ -47,10 +47,10 @@ class TripletCoarseLoss(nn.Module):
         rows_masked = rows.clone()
         rows_masked[torch.arange(P, device=device), j_ids] = -1e9
 
-        # Pick top 2*N hard negatives (by similarity) then randomly subsample N
-        k = min(2 * N, S - 1)
-        _, top_idx = torch.topk(rows_masked, k, dim=1)  # [P, k]
-        rand_perm = torch.randperm(k, device=device)[:N]
+        # Pick top 20 hard negatives (by similarity) then randomly subsample N
+        pool = min(20, S - 1)
+        _, top_idx = torch.topk(rows_masked, pool, dim=1)  # [P, pool]
+        rand_perm = torch.randperm(pool, device=device)[:N]
         neg_idx = top_idx[:, rand_perm]  # [P, N]
 
         # Negative similarities: [P, N]
