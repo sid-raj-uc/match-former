@@ -81,7 +81,7 @@ class PL_LoFTR(pl.LightningModule):
         compute_supervision(batch, self.config)
 
         # Step 3: Clear keys that the forward will re-populate
-        for key in ['conf_matrix', 'b_ids', 'i_ids', 'j_ids', 'gt_mask',
+        for key in ['conf_matrix', 'sim_matrix', 'b_ids', 'i_ids', 'j_ids', 'gt_mask',
                     'm_bids', 'mkpts0_c', 'mkpts1_c', 'mconf',
                     'expec_f', 'mkpts0_f', 'mkpts1_f']:
             batch.pop(key, None)

@@ -85,7 +85,7 @@ def epipolar_coarse_forward(self, feat_c0, feat_c1, data, mask_c0=None, mask_c1=
         epi_mask = get_epipolar_mask_matrix(self.epipolar_F, H0, W0, H1, W1, tau=tau, device=conf_matrix.device)
         conf_matrix = conf_matrix * epi_mask
 
-    data.update({'conf_matrix': conf_matrix})
+    data.update({'conf_matrix': conf_matrix, 'sim_matrix': sim_matrix})
     data.update(**self.get_coarse_match(conf_matrix, data))
 
 CoarseMatching.forward = epipolar_coarse_forward

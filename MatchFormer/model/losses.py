@@ -3,86 +3,62 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class FocalLoss(nn.Module):
+class TripletCoarseLoss(nn.Module):
     """
-    Binary focal loss: FL(p) = -alpha * (1-p)^gamma * log(p)
-    Applied element-wise on the normalized confidence matrix.
+    Triplet margin loss on the raw pre-softmax similarity matrix.
 
-    neg_per_pos > 0: instead of computing loss on all ~23M negatives, sample
-    neg_per_pos negatives per positive from the same row (same patch in image 0)
-    and neg_per_pos from the same column (same patch in image 1). This keeps the
-    negative-to-positive gradient ratio at 2*neg_per_pos:1 regardless of how many
-    scenes are in the batch, preventing confidence collapse during multi-scene training.
+    For each GT positive pair (b, i, j_pos), picks the top 2*neg_per_pos most
+    similar wrong columns in that row, randomly samples neg_per_pos of those as
+    hard negatives, then computes:
+
+        loss = mean( max(0, margin - sim[i, j_pos] + sim[i, j_neg]) )
+
+    Once every triplet satisfies the margin, gradient is zero and features
+    stabilize — avoiding the confidence collapse caused by focal loss on
+    dual-softmax values that can never reach 1.0 over large grids.
     """
-    def __init__(self, alpha=0.5, gamma=0.0, neg_per_pos=0):
+    def __init__(self, margin=1.0, neg_per_pos=10):
         super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+        self.margin = margin
         self.neg_per_pos = neg_per_pos
 
-    def _sample_neg_mask(self, conf_matrix, b_ids, i_ids, j_ids):
-        """
-        For each GT positive (b, i, j), sample neg_per_pos negatives from:
-          - row i  (same patch in image 0, wrong patch in image 1)
-          - col j  (same patch in image 1, wrong patch in image 0)
-        Returns a bool mask of shape [B, L, S].
-        Fully vectorized — no Python loop over positives.
-        """
-        B, L, S = conf_matrix.shape
-        device = conf_matrix.device
-        P, N = len(b_ids), self.neg_per_pos
-        neg_sample = torch.zeros(B, L, S, dtype=torch.bool, device=device)
-
-        # --- Row negatives: sample N cols from row i, excluding col j ---
-        # Sample from [0, S-1] then shift indices >= j up by 1 to skip j
-        rand_cols = torch.randint(0, S - 1, (P, N), device=device)
-        rand_cols[rand_cols >= j_ids.unsqueeze(1)] += 1
-        neg_sample[
-            b_ids.unsqueeze(1).expand(P, N).reshape(-1),
-            i_ids.unsqueeze(1).expand(P, N).reshape(-1),
-            rand_cols.reshape(-1),
-        ] = True
-
-        # --- Col negatives: sample N rows from col j, excluding row i ---
-        rand_rows = torch.randint(0, L - 1, (P, N), device=device)
-        rand_rows[rand_rows >= i_ids.unsqueeze(1)] += 1
-        neg_sample[
-            b_ids.unsqueeze(1).expand(P, N).reshape(-1),
-            rand_rows.reshape(-1),
-            j_ids.unsqueeze(1).expand(P, N).reshape(-1),
-        ] = True
-
-        return neg_sample
-
-    def forward(self, conf_matrix, b_ids, i_ids, j_ids, weight_pos=1.0):
+    def forward(self, sim_matrix, b_ids, i_ids, j_ids):
         """
         Args:
-            conf_matrix [B, L, S]: softmax-normalized confidence scores
-            b_ids, i_ids, j_ids: GT match flat indices (batch, row in img0, col in img1)
-            weight_pos: scalar multiplier for positive sample weight
+            sim_matrix [B, L, S]: raw pre-softmax similarity scores
+            b_ids, i_ids, j_ids: GT match indices (batch, row in img0, col in img1)
         Returns:
             scalar loss
         """
-        device = conf_matrix.device
+        if len(b_ids) == 0:
+            return sim_matrix.sum() * 0.0
 
-        pos_mask = torch.zeros_like(conf_matrix)
-        if len(b_ids) > 0:
-            pos_mask[b_ids, i_ids, j_ids] = 1.0
+        P = len(b_ids)
+        N = self.neg_per_pos
+        device = sim_matrix.device
+        S = sim_matrix.shape[2]
 
-        if self.neg_per_pos > 0 and len(b_ids) > 0:
-            # Sampled negatives: controlled ratio regardless of scene diversity
-            neg_sample = self._sample_neg_mask(conf_matrix, b_ids, i_ids, j_ids)
-            neg_mask = neg_sample.float() * (1.0 - pos_mask)
-        else:
-            # Default: all negatives (original behaviour)
-            neg_mask = 1.0 - pos_mask
+        # Positive similarities: [P]
+        sim_pos = sim_matrix[b_ids, i_ids, j_ids]  # [P]
 
-        p = conf_matrix.clamp(1e-7, 1 - 1e-7)
-        loss_pos = -self.alpha * (1 - p) ** self.gamma * torch.log(p) * pos_mask
-        loss_neg = -(1 - self.alpha) * p ** self.gamma * torch.log(1 - p) * neg_mask
+        # For each positive, fetch its full row and zero out the GT column
+        # so it cannot be picked as a hard negative
+        rows = sim_matrix[b_ids, i_ids]  # [P, S]
+        rows_masked = rows.clone()
+        rows_masked[torch.arange(P, device=device), j_ids] = -1e9
 
-        loss = (weight_pos * loss_pos + loss_neg).sum() / (pos_mask.sum() + 1e-8)
-        return loss
+        # Pick top 2*N hard negatives (by similarity) then randomly subsample N
+        k = min(2 * N, S - 1)
+        _, top_idx = torch.topk(rows_masked, k, dim=1)  # [P, k]
+        rand_perm = torch.randperm(k, device=device)[:N]
+        neg_idx = top_idx[:, rand_perm]  # [P, N]
+
+        # Negative similarities: [P, N]
+        sim_neg = rows[torch.arange(P, device=device).unsqueeze(1), neg_idx]
+
+        # Triplet hinge loss: [P, N] → scalar
+        loss = torch.clamp(self.margin - sim_pos.unsqueeze(1) + sim_neg, min=0.0)
+        return loss.mean()
 
 
 def fine_loss(data):
@@ -123,9 +99,9 @@ def fine_loss(data):
 
 
 class MatchFormerLoss(nn.Module):
-    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0):
+    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=10):
         super().__init__()
-        self.focal = FocalLoss(alpha=0.5, gamma=0.0, neg_per_pos=neg_per_pos)
+        self.triplet = TripletCoarseLoss(margin=1.0, neg_per_pos=neg_per_pos)
         self.lambda_c = lambda_c
         self.lambda_f = lambda_f
 
@@ -133,16 +109,16 @@ class MatchFormerLoss(nn.Module):
         """
         Args:
             data (dict): output from Matchformer.forward(), augmented with supervision keys:
-                'conf_matrix', 'spv_b_ids', 'spv_i_ids', 'spv_j_ids', 'expec_f', 'gt_mask'
+                'sim_matrix', 'spv_b_ids', 'spv_i_ids', 'spv_j_ids', 'expec_f', 'gt_mask'
         Returns:
             dict with 'loss', 'loss_c', 'loss_f'
         """
-        conf_matrix = data['conf_matrix']
+        sim_matrix = data['sim_matrix']
         spv_b = data['spv_b_ids']
         spv_i = data['spv_i_ids']
         spv_j = data['spv_j_ids']
 
-        loss_c = self.focal(conf_matrix, spv_b, spv_i, spv_j)
+        loss_c = self.triplet(sim_matrix, spv_b, spv_i, spv_j)
         loss_f = fine_loss(data)
 
         total = self.lambda_c * loss_c + self.lambda_f * loss_f
