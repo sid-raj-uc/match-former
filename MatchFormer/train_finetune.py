@@ -17,6 +17,7 @@ Usage:
     python train_finetune.py --resume checkpoints/last.ckpt --steps 10000
 """
 
+import copy
 import os
 import re
 import glob
@@ -133,12 +134,21 @@ class EpipolarFineTuner(PL_LoFTR):
     Before each forward pass in training, we compute F from the batch poses
     and inject it into CoarseMatching.
     """
-    def __init__(self, config, pretrained_ckpt=None, tau=10.0):
+    def __init__(self, config, pretrained_ckpt=None, tau=10.0, lambda_kl=0.0):
         super().__init__(config, pretrained_ckpt=pretrained_ckpt)
         self.tau = tau
         self.T_cv2gl = torch.tensor([
             [1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]
         ], dtype=torch.float32)
+        # Frozen reference model for KL regularization
+        self.lambda_kl = lambda_kl
+        if lambda_kl > 0:
+            self.frozen_matcher = copy.deepcopy(self.matcher)
+            for p in self.frozen_matcher.parameters():
+                p.requires_grad_(False)
+            print(f"[KL] Frozen reference model created (lambda_kl={lambda_kl})")
+        else:
+            self.frozen_matcher = None
 
     def _inject_epipolar(self, batch):
         """Compute F from first item in batch and inject into coarse_matching."""
@@ -152,12 +162,61 @@ class EpipolarFineTuner(PL_LoFTR):
             F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
             self.matcher.coarse_matching.epipolar_F = F_mat
             self.matcher.coarse_matching.epipolar_tau = self.tau
+            if self.frozen_matcher is not None:
+                self.frozen_matcher.coarse_matching.epipolar_F = F_mat
+                self.frozen_matcher.coarse_matching.epipolar_tau = self.tau
         except Exception:
             self.matcher.coarse_matching.epipolar_F = None
+            if self.frozen_matcher is not None:
+                self.frozen_matcher.coarse_matching.epipolar_F = None
 
     def training_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
-        return super().training_step(batch, batch_idx)
+
+        # Step 1: eval pass to populate hw0_c / hw1_c
+        self.matcher.eval()
+        with torch.no_grad():
+            self.matcher(batch)
+        self.matcher.train()
+
+        # Step 1b: get reference conf_matrix from frozen model (KL regularization)
+        if self.frozen_matcher is not None:
+            self.frozen_matcher.eval()
+            frozen_batch = dict(batch)   # shallow copy — forward only adds new keys
+            with torch.no_grad():
+                self.frozen_matcher(frozen_batch)
+            batch['ref_conf_matrix'] = frozen_batch['conf_matrix'].detach()
+
+        # Step 2: supervision labels
+        from model.supervision import compute_supervision
+        compute_supervision(batch, self.config)
+
+        # Step 3: clear keys that the forward will re-populate
+        for key in ['conf_matrix', 'sim_matrix', 'b_ids', 'i_ids', 'j_ids', 'gt_mask',
+                    'm_bids', 'mkpts0_c', 'mkpts1_c', 'mconf',
+                    'expec_f', 'mkpts0_f', 'mkpts1_f']:
+            batch.pop(key, None)
+
+        # Step 4: real training forward
+        self.matcher(batch)
+
+        # Step 5: compute losses
+        losses = self.criterion(batch)
+
+        self.log('train/loss',    losses['loss'],    on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss_c',  losses['loss_c'],  on_step=True, on_epoch=True)
+        self.log('train/loss_f',  losses['loss_f'],  on_step=True, on_epoch=True)
+        self.log('train/loss_kl', losses['loss_kl'], on_step=True, on_epoch=True)
+
+        conf = batch.get('conf_matrix')
+        if conf is not None:
+            self.log('train/conf_max',  conf.max().item(),  on_step=True, on_epoch=False)
+            self.log('train/conf_mean', conf.mean().item(), on_step=True, on_epoch=False)
+            n_matches = batch.get('b_ids')
+            if n_matches is not None:
+                self.log('train/num_matches', float(len(n_matches)), on_step=True, on_epoch=False)
+
+        return losses['loss']
 
     def validation_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
@@ -191,6 +250,10 @@ def main():
                         help='Sampled negatives per positive in focal loss. '
                              '0 = use all negatives (original). '
                              '15 recommended for multi-scene phase 2 training.')
+    parser.add_argument('--lambda_kl',     type=float, default=0.1,
+                        help='Weight for KL divergence regularization loss. '
+                             'Penalizes the model for diverging from pretrained weights. '
+                             '0 = disabled. 0.1 recommended to prevent catastrophic forgetting.')
     parser.add_argument('--override_lr',   action='store_true',
                         help='Override the learning rate stored in the resumed checkpoint. '
                              'Use this when resuming phase 1 checkpoint for phase 2 at a lower lr.')
@@ -229,9 +292,10 @@ def main():
     config.MATCHFORMER.COARSE.D_FFN = 192
     config.LR            = args.lr
     config.TOTAL_STEPS   = args.steps
-    config.LOSS_LAMBDA_C = 1.0
-    config.LOSS_LAMBDA_F = 0.5
-    config.NEG_PER_POS   = args.neg_per_pos
+    config.LOSS_LAMBDA_C  = 1.0
+    config.LOSS_LAMBDA_F  = 0.5
+    config.NEG_PER_POS    = args.neg_per_pos
+    config.LOSS_LAMBDA_KL = args.lambda_kl
 
     # ── Dataset ─────────────────────────────────────────────────────────────
     max_pairs = 5 if args.overfit else None
@@ -254,7 +318,7 @@ def main():
                               num_workers=0, collate_fn=collate_fn)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    model = EpipolarFineTuner(config, pretrained_ckpt=args.ckpt, tau=args.tau)
+    model = EpipolarFineTuner(config, pretrained_ckpt=args.ckpt, tau=args.tau, lambda_kl=args.lambda_kl)
 
     # ── Callbacks & Trainer ──────────────────────────────────────────────────
     callbacks = [
@@ -292,6 +356,7 @@ def main():
                 'batch': args.batch,
                 'tau': args.tau,
                 'neg_per_pos': args.neg_per_pos,
+                'lambda_kl': args.lambda_kl,
                 'frame_gap': args.frame_gap,
                 'precision': precision,
                 'resume': resume_path,

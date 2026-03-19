@@ -35,6 +35,7 @@ class PL_LoFTR(pl.LightningModule):
             lambda_c=getattr(config, 'LOSS_LAMBDA_C', 1.0),
             lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
             neg_per_pos=getattr(config, 'NEG_PER_POS', 0),
+            lambda_kl=getattr(config, 'LOSS_LAMBDA_KL', 0.0),
         )
         
         # Training hyperparameters
@@ -92,9 +93,10 @@ class PL_LoFTR(pl.LightningModule):
         # Step 5: Compute losses
         losses = self.criterion(batch)
 
-        self.log('train/loss',   losses['loss'],   on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
-        self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
+        self.log('train/loss',    losses['loss'],    on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss_c',  losses['loss_c'],  on_step=True, on_epoch=True)
+        self.log('train/loss_f',  losses['loss_f'],  on_step=True, on_epoch=True)
+        self.log('train/loss_kl', losses['loss_kl'], on_step=True, on_epoch=True)
 
         # Confidence matrix health: track max and mean to detect collapse early
         conf = batch.get('conf_matrix')
