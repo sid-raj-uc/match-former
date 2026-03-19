@@ -25,6 +25,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader, random_split
 
 # ── Project imports ─────────────────────────────────────────────────────────
@@ -193,6 +194,12 @@ def main():
     parser.add_argument('--override_lr',   action='store_true',
                         help='Override the learning rate stored in the resumed checkpoint. '
                              'Use this when resuming phase 1 checkpoint for phase 2 at a lower lr.')
+    parser.add_argument('--wandb',          action='store_true',
+                        help='Enable Weights & Biases logging.')
+    parser.add_argument('--wandb_project',  default='matchformer-finetune',
+                        help='W&B project name.')
+    parser.add_argument('--wandb_run',      default=None,
+                        help='W&B run name. Auto-generated if not set.')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -269,6 +276,30 @@ def main():
     if precision == 'bf16':
         precision = 'bf16-mixed'
 
+    # ── W&B logger (optional) ────────────────────────────────────────────────
+    loggers = []
+    if args.wandb:
+        run_name = args.wandb_run or (
+            f"phase2-lr{args.lr}-neg{args.neg_per_pos}" if args.override_lr
+            else f"phase1-lr{args.lr}"
+        )
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            name=run_name,
+            config={
+                'lr': args.lr,
+                'steps': args.steps,
+                'batch': args.batch,
+                'tau': args.tau,
+                'neg_per_pos': args.neg_per_pos,
+                'frame_gap': args.frame_gap,
+                'precision': precision,
+                'resume': resume_path,
+            },
+        )
+        loggers.append(wandb_logger)
+        print(f"[W&B] Logging to project='{args.wandb_project}' run='{run_name}'")
+
     trainer = pl.Trainer(
         max_steps=args.steps,   # --steps is always respected; use --steps 50 for quick overfit check
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
@@ -279,6 +310,7 @@ def main():
         limit_val_batches=0.0 if args.overfit else 1.0,
         val_check_interval=1.0,  # validate once per epoch (not every 500 steps — val is slow on Drive)
         callbacks=callbacks,
+        logger=loggers if loggers else True,  # True = default CSV logger
         enable_progress_bar=True,
         gradient_clip_val=1.0,
     )

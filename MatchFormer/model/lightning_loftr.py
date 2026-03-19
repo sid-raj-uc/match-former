@@ -95,6 +95,16 @@ class PL_LoFTR(pl.LightningModule):
         self.log('train/loss',   losses['loss'],   on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
         self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
+
+        # Confidence matrix health: track max and mean to detect collapse early
+        conf = batch.get('conf_matrix')
+        if conf is not None:
+            self.log('train/conf_max',  conf.max().item(),  on_step=True, on_epoch=False)
+            self.log('train/conf_mean', conf.mean().item(), on_step=True, on_epoch=False)
+            n_matches = batch.get('b_ids')
+            if n_matches is not None:
+                self.log('train/num_matches', float(len(n_matches)), on_step=True, on_epoch=False)
+
         return losses['loss']
 
     def validation_step(self, batch, batch_idx):
