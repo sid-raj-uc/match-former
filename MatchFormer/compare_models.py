@@ -160,6 +160,7 @@ def main():
         ('Fine-tuned 15k',           'model/weights/epipolar-step=15000.ckpt',     False),
         ('Fine-tuned 17.5k',         'model/weights/epipolar-step=17500.ckpt',     False),
         ('Fine-tuned 20k',           'model/weights/epipolar-model.ckpt',          False),
+        ('Fine-tuned model3',        'model/weights/model3.ckpt',                  False),
     ]
 
     thr_values = [0.005, 0.01, 0.03, 0.06, 0.1, 0.2]

@@ -26,23 +26,31 @@ class FocalLoss(nn.Module):
           - row i  (same patch in image 0, wrong patch in image 1)
           - col j  (same patch in image 1, wrong patch in image 0)
         Returns a bool mask of shape [B, L, S].
+        Fully vectorized — no Python loop over positives.
         """
         B, L, S = conf_matrix.shape
         device = conf_matrix.device
+        P, N = len(b_ids), self.neg_per_pos
         neg_sample = torch.zeros(B, L, S, dtype=torch.bool, device=device)
 
-        for b, i, j in zip(b_ids.tolist(), i_ids.tolist(), j_ids.tolist()):
-            # Row negatives: same row i, exclude the positive column j
-            row_cols = torch.arange(S, device=device)
-            row_cols = row_cols[row_cols != j]
-            perm = torch.randperm(len(row_cols), device=device)[:self.neg_per_pos]
-            neg_sample[b, i, row_cols[perm]] = True
+        # --- Row negatives: sample N cols from row i, excluding col j ---
+        # Sample from [0, S-1] then shift indices >= j up by 1 to skip j
+        rand_cols = torch.randint(0, S - 1, (P, N), device=device)
+        rand_cols[rand_cols >= j_ids.unsqueeze(1)] += 1
+        neg_sample[
+            b_ids.unsqueeze(1).expand(P, N).reshape(-1),
+            i_ids.unsqueeze(1).expand(P, N).reshape(-1),
+            rand_cols.reshape(-1),
+        ] = True
 
-            # Column negatives: same column j, exclude the positive row i
-            col_rows = torch.arange(L, device=device)
-            col_rows = col_rows[col_rows != i]
-            perm = torch.randperm(len(col_rows), device=device)[:self.neg_per_pos]
-            neg_sample[b, col_rows[perm], j] = True
+        # --- Col negatives: sample N rows from col j, excluding row i ---
+        rand_rows = torch.randint(0, L - 1, (P, N), device=device)
+        rand_rows[rand_rows >= i_ids.unsqueeze(1)] += 1
+        neg_sample[
+            b_ids.unsqueeze(1).expand(P, N).reshape(-1),
+            rand_rows.reshape(-1),
+            j_ids.unsqueeze(1).expand(P, N).reshape(-1),
+        ] = True
 
         return neg_sample
 
