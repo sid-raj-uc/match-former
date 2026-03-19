@@ -34,6 +34,7 @@ class PL_LoFTR(pl.LightningModule):
         self.criterion = MatchFormerLoss(
             lambda_c=getattr(config, 'LOSS_LAMBDA_C', 1.0),
             lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
+            neg_per_pos=getattr(config, 'NEG_PER_POS', 0),
         )
         
         # Training hyperparameters
@@ -46,7 +47,10 @@ class PL_LoFTR(pl.LightningModule):
         if pretrained_ckpt:
             ckpt = torch.load(pretrained_ckpt, map_location='cpu')
             state = ckpt.get('state_dict', ckpt)
-            self.matcher.load_state_dict({k.replace('matcher.',''):v for k,v in state.items() if not k.startswith(('epoch','global_step','pytorch-lightning'))})
+            matcher_state = {k.replace('matcher.', ''): v for k, v in state.items() if k.startswith('matcher.')}
+            if not matcher_state:
+                matcher_state = {k: v for k, v in state.items() if not k.startswith(('epoch', 'global_step', 'pytorch-lightning', 'criterion'))}
+            self.matcher.load_state_dict(matcher_state)
             logger.info(f"Load '{pretrained_ckpt}' as pretrained checkpoint")
         
         # Testing

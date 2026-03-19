@@ -7,11 +7,44 @@ class FocalLoss(nn.Module):
     """
     Binary focal loss: FL(p) = -alpha * (1-p)^gamma * log(p)
     Applied element-wise on the normalized confidence matrix.
+
+    neg_per_pos > 0: instead of computing loss on all ~23M negatives, sample
+    neg_per_pos negatives per positive from the same row (same patch in image 0)
+    and neg_per_pos from the same column (same patch in image 1). This keeps the
+    negative-to-positive gradient ratio at 2*neg_per_pos:1 regardless of how many
+    scenes are in the batch, preventing confidence collapse during multi-scene training.
     """
-    def __init__(self, alpha=0.25, gamma=2.0):
+    def __init__(self, alpha=0.25, gamma=2.0, neg_per_pos=0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.neg_per_pos = neg_per_pos
+
+    def _sample_neg_mask(self, conf_matrix, b_ids, i_ids, j_ids):
+        """
+        For each GT positive (b, i, j), sample neg_per_pos negatives from:
+          - row i  (same patch in image 0, wrong patch in image 1)
+          - col j  (same patch in image 1, wrong patch in image 0)
+        Returns a bool mask of shape [B, L, S].
+        """
+        B, L, S = conf_matrix.shape
+        device = conf_matrix.device
+        neg_sample = torch.zeros(B, L, S, dtype=torch.bool, device=device)
+
+        for b, i, j in zip(b_ids.tolist(), i_ids.tolist(), j_ids.tolist()):
+            # Row negatives: same row i, exclude the positive column j
+            row_cols = torch.arange(S, device=device)
+            row_cols = row_cols[row_cols != j]
+            perm = torch.randperm(len(row_cols), device=device)[:self.neg_per_pos]
+            neg_sample[b, i, row_cols[perm]] = True
+
+            # Column negatives: same column j, exclude the positive row i
+            col_rows = torch.arange(L, device=device)
+            col_rows = col_rows[col_rows != i]
+            perm = torch.randperm(len(col_rows), device=device)[:self.neg_per_pos]
+            neg_sample[b, col_rows[perm], j] = True
+
+        return neg_sample
 
     def forward(self, conf_matrix, b_ids, i_ids, j_ids, weight_pos=1.0):
         """
@@ -24,15 +57,19 @@ class FocalLoss(nn.Module):
         """
         device = conf_matrix.device
 
-        # Build binary GT label matrix (sparse, default 0)
         pos_mask = torch.zeros_like(conf_matrix)
         if len(b_ids) > 0:
             pos_mask[b_ids, i_ids, j_ids] = 1.0
 
-        # Focal loss
-        p = conf_matrix.clamp(1e-7, 1 - 1e-7)
-        neg_mask = 1.0 - pos_mask
+        if self.neg_per_pos > 0 and len(b_ids) > 0:
+            # Sampled negatives: controlled ratio regardless of scene diversity
+            neg_sample = self._sample_neg_mask(conf_matrix, b_ids, i_ids, j_ids)
+            neg_mask = neg_sample.float() * (1.0 - pos_mask)
+        else:
+            # Default: all negatives (original behaviour)
+            neg_mask = 1.0 - pos_mask
 
+        p = conf_matrix.clamp(1e-7, 1 - 1e-7)
         loss_pos = -self.alpha * (1 - p) ** self.gamma * torch.log(p) * pos_mask
         loss_neg = -(1 - self.alpha) * p ** self.gamma * torch.log(1 - p) * neg_mask
 
@@ -78,9 +115,9 @@ def fine_loss(data):
 
 
 class MatchFormerLoss(nn.Module):
-    def __init__(self, lambda_c=1.0, lambda_f=0.5):
+    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0):
         super().__init__()
-        self.focal = FocalLoss(alpha=0.25, gamma=2.0)
+        self.focal = FocalLoss(alpha=0.25, gamma=2.0, neg_per_pos=neg_per_pos)
         self.lambda_c = lambda_c
         self.lambda_f = lambda_f
 

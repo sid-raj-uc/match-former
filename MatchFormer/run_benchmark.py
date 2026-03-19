@@ -51,7 +51,7 @@ def constrained_forward(self, feat_c0, feat_c1, data, mask_c0=None, mask_c1=None
         if mask_c0 is not None:
              sim_matrix.masked_fill_(~(mask_c0[..., None] * mask_c1[:, None]).bool(), -1e9)
         conf_matrix = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
-        
+
         if getattr(self, 'epipolar_F', None) is not None:
             tau = getattr(self, 'epipolar_tau', 10.0)
             H0, W0 = data['hw0_c']
@@ -106,7 +106,10 @@ def get_gt_matches(mkpts0, depth1_path, T1, T2, K):
     gt_pts = np.stack([u2, v2], axis=1)
     return valid, gt_pts
 
-def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, device='cpu'):
+def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, device='cpu', debug=False):
+    import time
+    def t(msg):
+        if debug: print(f'  [{time.time():.3f}] {msg}', flush=True)
     path0 = all_imgs[img0_idx]
     path1 = all_imgs[img1_idx]
 
@@ -117,6 +120,7 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, 
         T0 = np.loadtxt(os.path.join(data_dir, 'pose', f'{img0_idx_num}.txt'))
         T1 = np.loadtxt(os.path.join(data_dir, 'pose', f'{img1_idx_num}.txt'))
     except FileNotFoundError: return None
+    t('poses loaded')
 
     if not np.isfinite(T0).all() or not np.isfinite(T1).all(): return None
 
@@ -124,25 +128,31 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, 
     T0_cv = T0 @ T_cv2gl
     T1_cv = T1 @ T_cv2gl
     F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
+    t('F_mat computed')
 
     img0 = get_image_tensor(path0)
     img1 = get_image_tensor(path1)
     if img0 is None or img1 is None: return None
+    t('images loaded')
 
     depth0_path = os.path.join(data_dir, 'depth', f'{img0_idx_num}.png')
     input_data = {'image0': img0.to(device), 'image1': img1.to(device)}
 
     # Run vanilla once
     model.matcher.coarse_matching.epipolar_F = None
+    t('starting vanilla forward pass')
     with torch.no_grad():
         model.matcher(input_data)
-        mkpts0_v = input_data['mkpts0_f'].cpu().numpy()
-        mkpts1_v = input_data['mkpts1_f'].cpu().numpy()
+    t('vanilla forward pass done')
+    mkpts0_v = input_data['mkpts0_f'].cpu().numpy()
+    mkpts1_v = input_data['mkpts1_f'].cpu().numpy()
+    t(f'vanilla: {len(mkpts0_v)} matches')
 
     valid_mask_v, gt_mkpts1_v = get_gt_matches(mkpts0_v, depth0_path, T0, T1, K)
     mkpts0_v = mkpts0_v[valid_mask_v]
     mkpts1_v = mkpts1_v[valid_mask_v]
     gt_mkpts1_v = gt_mkpts1_v[valid_mask_v]
+    t(f'gt_matches done: {len(mkpts0_v)} valid')
     if len(mkpts0_v) == 0: return None
 
     errs_v = compute_gt_errors(mkpts1_v, gt_mkpts1_v)
@@ -156,13 +166,14 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, 
     # Sweep all taus in one pass per pair
     results_by_tau = {}
     for tau in tau_values:
+        t(f'starting constrained forward pass tau={tau}')
         model.matcher.coarse_matching.epipolar_F = F_mat
         model.matcher.coarse_matching.epipolar_tau = tau
         with torch.no_grad():
             model.matcher(input_data)
-            mkpts0_c = input_data['mkpts0_f'].cpu().numpy()
-            mkpts1_c = input_data['mkpts1_f'].cpu().numpy()
-
+        t(f'constrained forward pass done tau={tau}')
+        mkpts0_c = input_data['mkpts0_f'].cpu().numpy()
+        mkpts1_c = input_data['mkpts1_f'].cpu().numpy()
         valid_mask_c, gt_mkpts1_c = get_gt_matches(mkpts0_c, depth0_path, T0, T1, K)
         mkpts1_c = mkpts1_c[valid_mask_c]
         gt_mkpts1_c = gt_mkpts1_c[valid_mask_c]
@@ -215,59 +226,60 @@ def main():
 
     K = np.loadtxt(os.path.join(data_dir, 'intrinsic', 'intrinsic_depth.txt'))[:3, :3]
     
-    tau_values = [50.0, 20.0, 10.0, 5.0, 2.0]
+    thr_values = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.1, 0.2]
+    tau = 50.0  # fixed tau
     pair_gap = 20
     results = []
     idx = 0
 
-    print(f"--- Running ScanNet Benchmark for {args.num_pairs} Pairs ---")
-    pbar = tqdm(total=args.num_pairs, desc='Pairs', unit='pair')
-    while len(results) < args.num_pairs and idx < len(all_imgs) - pair_gap:
-        res = evaluate_pair(idx, idx + pair_gap, all_imgs, data_dir, K, model, tau_values, device=device)
+    print(f"--- Threshold Sweep Benchmark: {args.num_pairs} Pairs, tau={tau} ---")
+    print(f"Sweeping thresholds: {thr_values}\n")
+
+    # Step 1: Collect valid image index pairs at lowest threshold
+    model.matcher.coarse_matching.thr = thr_values[0]
+    valid_idxs = []
+    pbar = tqdm(total=args.num_pairs, desc='Collecting pairs', unit='pair')
+    while len(valid_idxs) < args.num_pairs and idx < len(all_imgs) - pair_gap:
+        res = evaluate_pair(idx, idx + pair_gap, all_imgs, data_dir, K, model, [tau], device=device, debug=(idx==0))
         if res is not None:
-            results.append(res)
-            v_p3 = np.mean([r['vanilla']['v_p3'] for r in results])
-            c_p3 = np.mean([r['by_tau'][tau_values[0]]['c_p3'] for r in results])
-            pbar.set_postfix({'vanilla_p3': f'{v_p3:.2%}', 'constrained_p3': f'{c_p3:.2%}'})
+            valid_idxs.append(idx)
+            pbar.set_postfix({'pairs': len(valid_idxs)})
             pbar.update(1)
         idx += 1
     pbar.close()
 
-    if not results:
-        print("No valid pairs found.")
+    if not valid_idxs:
+        print("No valid pairs found even at lowest threshold.")
         return
 
-    results_by_tau = {}
-    for tau in tau_values:
-        results_by_tau[tau] = {
-            'v_mean_err': np.mean([r['vanilla']['v_mean_err'] for r in results]),
-            'v_p3':       np.mean([r['vanilla']['v_p3']       for r in results]),
-            'v_p5':       np.mean([r['vanilla']['v_p5']       for r in results]),
-            'v_tot':      np.mean([r['vanilla']['v_total']    for r in results]),
-            'c_mean_err': np.mean([r['by_tau'][tau]['c_mean_err'] for r in results]),
-            'c_p3':       np.mean([r['by_tau'][tau]['c_p3']       for r in results]),
-            'c_p5':       np.mean([r['by_tau'][tau]['c_p5']       for r in results]),
-            'c_tot':      np.mean([r['by_tau'][tau]['c_total']    for r in results]),
-        }
-        
-    print("\n" + "="*50)
-    print("FINAL BENCHMARK SUMMARY")
-    print("="*50)
-    # The vanilla performance shouldn't change with tau, just take the first
-    v_perf = results_by_tau[tau_values[0]]
-    print(f"VANILLA MODEL:")
-    print(f"Mean GT Error:   {v_perf['v_mean_err']:.2f} px")
-    print(f"Precision @ 3px: {v_perf['v_p3']:.2%}")
-    print(f"Precision @ 5px: {v_perf['v_p5']:.2%}")
-    print(f"Avg Matches:     {v_perf['v_tot']:.1f}")
-    print("-" * 60)
-    print("CONSTRAINED MODEL PERFORMANCE SWEEP:")
-    print(f"{'Tau':<8} | {'Mean Err (px)':<15} | {'P@3px':<10} | {'P@5px':<10} | {'Avg Matches'}")
-    print("-" * 60)
-    for tau in tau_values:
-        perf = results_by_tau[tau]
-        print(f"{tau:<8} | {perf['c_mean_err']:<15.2f} | {perf['c_p3']:.2%}   | {perf['c_p5']:.2%}   | {perf['c_tot']:.1f}")
-    print("=" * 60)
+    print(f"\nCollected {len(valid_idxs)} valid pairs at thr={thr_values[0]}")
+
+    # Step 2: Sweep thresholds on the same pairs
+    print("\n" + "=" * 65)
+    print("THRESHOLD SWEEP RESULTS  (tau=50.0 fixed)")
+    print("=" * 65)
+    print(f"{'Thr':<8} | {'Mean Err (px)':<15} | {'P@3px':<10} | {'P@5px':<10} | {'Avg Matches'}")
+    print("-" * 65)
+
+    for thr in thr_values:
+        model.matcher.coarse_matching.thr = thr
+        thr_results = []
+        for i in valid_idxs:
+            res = evaluate_pair(i, i + pair_gap, all_imgs, data_dir, K, model, [tau], device=device)
+            if res is not None:
+                thr_results.append(res)
+
+        if not thr_results:
+            print(f"{thr:<8} | no matches")
+            continue
+
+        mean_err = np.mean([r['vanilla']['v_mean_err'] for r in thr_results])
+        p3       = np.mean([r['vanilla']['v_p3']       for r in thr_results])
+        p5       = np.mean([r['vanilla']['v_p5']       for r in thr_results])
+        avg_m    = np.mean([r['vanilla']['v_total']    for r in thr_results])
+        print(f"{thr:<8} | {mean_err:<15.2f} | {p3:.2%}   | {p5:.2%}   | {avg_m:.1f}")
+
+    print("=" * 65)
 
 if __name__ == '__main__':
     with torch.no_grad():

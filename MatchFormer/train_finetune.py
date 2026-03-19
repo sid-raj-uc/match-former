@@ -108,6 +108,24 @@ def collate_fn(batch):
 
 # ── Training with per-batch epipolar F injection ──────────────────────────────
 
+class LROverrideCallback(pl.Callback):
+    """
+    Overrides the optimizer learning rate after a checkpoint is restored.
+    Without this, resuming a checkpoint replays the saved optimizer state
+    (including its LR), ignoring the --lr argument. This callback fires
+    at the very start of training and forces the LR to the requested value.
+    Use for phase 2: resume from phase 1 checkpoint at a lower LR.
+    """
+    def __init__(self, lr):
+        self.lr = lr
+
+    def on_train_start(self, trainer, pl_module):
+        for optimizer in trainer.optimizers:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = self.lr
+        print(f"[LROverride] Learning rate set to {self.lr}")
+
+
 class EpipolarFineTuner(PL_LoFTR):
     """
     Extends PL_LoFTR with per-batch epipolar F matrix computation.
@@ -168,6 +186,13 @@ def main():
                         help='Overfit on 5 pairs to verify pipeline correctness')
     parser.add_argument('--precision',      default='32',
                         help='Training precision: 32, 16-mixed, or bf16 (L4/A100 recommended)')
+    parser.add_argument('--neg_per_pos',    type=int, default=0,
+                        help='Sampled negatives per positive in focal loss. '
+                             '0 = use all negatives (original). '
+                             '15 recommended for multi-scene phase 2 training.')
+    parser.add_argument('--override_lr',   action='store_true',
+                        help='Override the learning rate stored in the resumed checkpoint. '
+                             'Use this when resuming phase 1 checkpoint for phase 2 at a lower lr.')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -195,10 +220,11 @@ def main():
     config.MATCHFORMER.RESOLUTION = (8, 4)
     config.MATCHFORMER.COARSE.D_MODEL = 192
     config.MATCHFORMER.COARSE.D_FFN = 192
-    config.LR           = args.lr
-    config.TOTAL_STEPS  = args.steps
+    config.LR            = args.lr
+    config.TOTAL_STEPS   = args.steps
     config.LOSS_LAMBDA_C = 1.0
     config.LOSS_LAMBDA_F = 0.5
+    config.NEG_PER_POS   = args.neg_per_pos
 
     # ── Dataset ─────────────────────────────────────────────────────────────
     max_pairs = 5 if args.overfit else None
@@ -234,6 +260,9 @@ def main():
         ),
         pl.callbacks.LearningRateMonitor(logging_interval='step'),
     ]
+    if args.override_lr:
+        callbacks.append(LROverrideCallback(args.lr))
+        print(f"[Phase 2] LR override active: will set lr={args.lr} after checkpoint load")
 
     # Normalize precision flag: accept 'bf16' as alias for 'bf16-mixed'
     precision = args.precision
