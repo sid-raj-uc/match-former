@@ -53,6 +53,29 @@ class PL_LoFTR(pl.LightningModule):
                 matcher_state = {k: v for k, v in state.items() if not k.startswith(('epoch', 'global_step', 'pytorch-lightning', 'criterion'))}
             self.matcher.load_state_dict(matcher_state)
             logger.info(f"Load '{pretrained_ckpt}' as pretrained checkpoint")
+
+        # Freeze all parameters, then selectively unfreeze:
+        #   - AttentionBlock3 + AttentionBlock4: the cross-attention stages that
+        #     produce the coarse matching features
+        #   - layer1_outconv + layer1_outconv2: the FPN head that outputs fine features
+        for param in self.matcher.parameters():
+            param.requires_grad = False
+
+        trainable = [
+            self.matcher.backbone.AttentionBlock3,
+            self.matcher.backbone.AttentionBlock4,
+            self.matcher.backbone.layer1_outconv,
+            self.matcher.backbone.layer1_outconv2,
+        ]
+        for module in trainable:
+            for param in module.parameters():
+                param.requires_grad = True
+
+        n_train = sum(p.numel() for p in self.matcher.parameters() if p.requires_grad)
+        n_total = sum(p.numel() for p in self.matcher.parameters())
+        logger.info(f"Trainable params: {n_train:,} / {n_total:,} "
+                    f"({100*n_train/n_total:.1f}%) — "
+                    f"AttentionBlock3, AttentionBlock4, fine FPN head")
         
         # Testing
         self.dump_dir = dump_dir
