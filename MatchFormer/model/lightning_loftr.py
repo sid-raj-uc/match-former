@@ -122,19 +122,25 @@ class PL_LoFTR(pl.LightningModule):
         # Step 5: Compute losses
         losses = self.criterion(batch)
 
-        self.log('train/loss',    losses['loss'],    on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/loss_c',  losses['loss_c'],  on_step=True, on_epoch=True)
-        self.log('train/loss_f',  losses['loss_f'],  on_step=True, on_epoch=True)
-        self.log('train/loss_kl', losses['loss_kl'], on_step=True, on_epoch=True)
+        self.log('train/loss',   losses['loss'],   on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
+        self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
 
-        # Confidence matrix health: track max and mean to detect collapse early
+        # GT supervision — how many ground truth matches were found this batch
+        spv_b = batch.get('spv_b_ids')
+        if spv_b is not None:
+            self.log('train/num_gt_matches', float(len(spv_b)), on_step=True, on_epoch=False)
+
+        # Predicted matches that survived mutual nearest-neighbour + threshold
+        b_ids = batch.get('b_ids')
+        if b_ids is not None:
+            self.log('train/num_matches', float(len(b_ids)), on_step=True, on_epoch=False)
+
+        # Confidence matrix health — collapse detector
         conf = batch.get('conf_matrix')
         if conf is not None:
             self.log('train/conf_max',  conf.max().item(),  on_step=True, on_epoch=False)
             self.log('train/conf_mean', conf.mean().item(), on_step=True, on_epoch=False)
-            n_matches = batch.get('b_ids')
-            if n_matches is not None:
-                self.log('train/num_matches', float(len(n_matches)), on_step=True, on_epoch=False)
 
         return losses['loss']
 
@@ -150,11 +156,11 @@ class PL_LoFTR(pl.LightningModule):
         self.log('val/loss_c', losses['loss_c'], on_step=False, on_epoch=True)
         self.log('val/loss_f', losses['loss_f'], on_step=False, on_epoch=True)
 
-        # Compute mean GT reprojection error over predicted matches
-        from gt_epipolar import compute_fundamental_matrix
-        import numpy as np
+        spv_b = batch.get('spv_b_ids')
+        if spv_b is not None:
+            self.log('val/num_gt_matches', float(len(spv_b)), on_epoch=True)
+
         mkpts0 = batch.get('mkpts0_f')
-        mkpts1 = batch.get('mkpts1_f')
         if mkpts0 is not None and len(mkpts0) > 0:
             self.log('val/num_matches', float(len(mkpts0)), on_epoch=True)
         
