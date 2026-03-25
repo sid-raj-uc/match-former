@@ -191,7 +191,7 @@ def main():
                         help='Sampled negatives per positive in focal loss. '
                              '0 = use all negatives (original). '
                              '15 recommended for multi-scene phase 2 training.')
-parser.add_argument('--no_freeze',      action='store_true',
+    parser.add_argument('--no_freeze',      action='store_true',
                         help='Train all weights (no freezing). Default freezes all but AttentionBlock3/4 and fine FPN head.')
     parser.add_argument('--override_lr',   action='store_true',
                         help='Override the learning rate stored in the resumed checkpoint. '

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python extract_scannet.py --scenes scene0012_00)"
+    ]
+  }
+}
