@@ -95,7 +95,7 @@ def fine_loss(data):
 
 
 class MatchFormerLoss(nn.Module):
-    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0, lambda_kl=0.0):
+    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0):
         super().__init__()
         self.focal = FocalLoss(alpha=0.5, gamma=2.0, neg_per_pos=neg_per_pos)
         self.lambda_c = lambda_c
@@ -107,7 +107,7 @@ class MatchFormerLoss(nn.Module):
             data (dict): model output augmented with supervision keys:
                 'conf_matrix', 'spv_b_ids', 'spv_i_ids', 'spv_j_ids', 'expec_f', 'gt_mask'
         Returns:
-            dict with 'loss', 'loss_c', 'loss_f', 'loss_kl'
+            dict with 'loss', 'loss_c', 'loss_f'
         """
         conf_matrix = data['conf_matrix']
         spv_b = data['spv_b_ids']
@@ -123,5 +123,4 @@ class MatchFormerLoss(nn.Module):
             'loss': total,
             'loss_c': loss_c.detach(),
             'loss_f': loss_f.detach() if isinstance(loss_f, torch.Tensor) else torch.tensor(0.0),
-            'loss_kl': torch.tensor(0.0),
         }

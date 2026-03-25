@@ -20,7 +20,7 @@ from .utils.profiler import PassThroughProfiler
 
 
 class PL_LoFTR(pl.LightningModule):
-    def __init__(self, config, pretrained_ckpt=None, profiler=None, dump_dir=None):
+    def __init__(self, config, pretrained_ckpt=None, profiler=None, dump_dir=None, freeze_backbone=True):
         super().__init__()
         # Misc
         self.config = config  # full config
@@ -35,7 +35,6 @@ class PL_LoFTR(pl.LightningModule):
             lambda_c=getattr(config, 'LOSS_LAMBDA_C', 1.0),
             lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
             neg_per_pos=getattr(config, 'NEG_PER_POS', 0),
-            lambda_kl=getattr(config, 'LOSS_LAMBDA_KL', 0.0),
         )
         
         # Training hyperparameters
@@ -54,28 +53,33 @@ class PL_LoFTR(pl.LightningModule):
             self.matcher.load_state_dict(matcher_state)
             logger.info(f"Load '{pretrained_ckpt}' as pretrained checkpoint")
 
-        # Freeze all parameters, then selectively unfreeze:
-        #   - AttentionBlock3 + AttentionBlock4: the cross-attention stages that
-        #     produce the coarse matching features
-        #   - layer1_outconv + layer1_outconv2: the FPN head that outputs fine features
-        for param in self.matcher.parameters():
-            param.requires_grad = False
+        if freeze_backbone:
+            # Freeze all parameters, then selectively unfreeze:
+            #   - AttentionBlock3 + AttentionBlock4: the cross-attention stages that
+            #     produce the coarse matching features
+            #   - layer1_outconv + layer1_outconv2: the FPN head that outputs fine features
+            for param in self.matcher.parameters():
+                param.requires_grad = False
 
-        trainable = [
-            self.matcher.backbone.AttentionBlock3,
-            self.matcher.backbone.AttentionBlock4,
-            self.matcher.backbone.layer1_outconv,
-            self.matcher.backbone.layer1_outconv2,
-        ]
-        for module in trainable:
-            for param in module.parameters():
-                param.requires_grad = True
+            trainable = [
+                self.matcher.backbone.AttentionBlock3,
+                self.matcher.backbone.AttentionBlock4,
+                self.matcher.backbone.layer1_outconv,
+                self.matcher.backbone.layer1_outconv2,
+            ]
+            for module in trainable:
+                for param in module.parameters():
+                    param.requires_grad = True
 
-        n_train = sum(p.numel() for p in self.matcher.parameters() if p.requires_grad)
-        n_total = sum(p.numel() for p in self.matcher.parameters())
-        logger.info(f"Trainable params: {n_train:,} / {n_total:,} "
-                    f"({100*n_train/n_total:.1f}%) — "
-                    f"AttentionBlock3, AttentionBlock4, fine FPN head")
+            n_train = sum(p.numel() for p in self.matcher.parameters() if p.requires_grad)
+            n_total = sum(p.numel() for p in self.matcher.parameters())
+            logger.info(f"Trainable params: {n_train:,} / {n_total:,} "
+                        f"({100*n_train/n_total:.1f}%) — "
+                        f"AttentionBlock3, AttentionBlock4, fine FPN head")
+        else:
+            n_train = sum(p.numel() for p in self.matcher.parameters())
+            n_total = n_train
+            logger.info(f"Trainable params: {n_train:,} / {n_total:,} (100.0%) — all weights unfrozen")
         
         # Testing
         self.dump_dir = dump_dir
@@ -100,12 +104,6 @@ class PL_LoFTR(pl.LightningModule):
         with torch.no_grad():
             self.matcher(batch)
         self.matcher.train()
-
-        # Save eval-pass conf_matrix as reference for KL regularization
-        # before step 3 clears it.  This is the model's current inference
-        # distribution — KL(ref || train) keeps train mode close to it.
-        if 'conf_matrix' in batch:
-            batch['ref_conf_matrix'] = batch['conf_matrix'].detach().clone()
 
         # Step 2: Compute supervision labels (populates spv_b_ids/i_ids/j_ids)
         compute_supervision(batch, self.config)

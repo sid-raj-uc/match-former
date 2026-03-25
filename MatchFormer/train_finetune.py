@@ -133,8 +133,8 @@ class EpipolarFineTuner(PL_LoFTR):
     Before each forward pass in training, we compute F from the batch poses
     and inject it into CoarseMatching.
     """
-    def __init__(self, config, pretrained_ckpt=None, tau=10.0, lambda_kl=0.0):
-        super().__init__(config, pretrained_ckpt=pretrained_ckpt)
+    def __init__(self, config, pretrained_ckpt=None, tau=10.0, freeze_backbone=True):
+        super().__init__(config, pretrained_ckpt=pretrained_ckpt, freeze_backbone=freeze_backbone)
         self.tau = tau
         self.T_cv2gl = torch.tensor([
             [1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]
@@ -191,10 +191,8 @@ def main():
                         help='Sampled negatives per positive in focal loss. '
                              '0 = use all negatives (original). '
                              '15 recommended for multi-scene phase 2 training.')
-    parser.add_argument('--lambda_kl',     type=float, default=0.1,
-                        help='Weight for KL divergence regularization loss. '
-                             'Penalizes the model for diverging from pretrained weights. '
-                             '0 = disabled. 0.1 recommended to prevent catastrophic forgetting.')
+parser.add_argument('--no_freeze',      action='store_true',
+                        help='Train all weights (no freezing). Default freezes all but AttentionBlock3/4 and fine FPN head.')
     parser.add_argument('--override_lr',   action='store_true',
                         help='Override the learning rate stored in the resumed checkpoint. '
                              'Use this when resuming phase 1 checkpoint for phase 2 at a lower lr.')
@@ -236,7 +234,7 @@ def main():
     config.LOSS_LAMBDA_C  = 1.0
     config.LOSS_LAMBDA_F  = 0.5
     config.NEG_PER_POS    = args.neg_per_pos
-    config.LOSS_LAMBDA_KL = args.lambda_kl
+
 
     # ── Dataset ─────────────────────────────────────────────────────────────
     max_pairs = 5 if args.overfit else None
@@ -259,7 +257,8 @@ def main():
                               num_workers=0, collate_fn=collate_fn)
 
     # ── Model ────────────────────────────────────────────────────────────────
-    model = EpipolarFineTuner(config, pretrained_ckpt=args.ckpt, tau=args.tau, lambda_kl=args.lambda_kl)
+    model = EpipolarFineTuner(config, pretrained_ckpt=args.ckpt, tau=args.tau,
+                               freeze_backbone=not args.no_freeze)
 
     # ── Callbacks & Trainer ──────────────────────────────────────────────────
     callbacks = [
@@ -297,8 +296,7 @@ def main():
                 'batch': args.batch,
                 'tau': args.tau,
                 'neg_per_pos': args.neg_per_pos,
-                'lambda_kl': args.lambda_kl,
-                'frame_gap': args.frame_gap,
+'frame_gap': args.frame_gap,
                 'precision': precision,
                 'resume': resume_path,
             },
