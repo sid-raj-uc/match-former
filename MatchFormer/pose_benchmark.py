@@ -188,6 +188,8 @@ def main():
     parser.add_argument('--scenes', nargs='+',
                         default=['scene0011_00', 'scene0012_00', 'scene0013_00',
                                  'scene0014_00', 'scene0015_00'])
+    parser.add_argument('--data_dir', type=str, default='../data/scans',
+                        help='Root directory containing scene subdirs')
     parser.add_argument('--tau', type=float, default=10.0,
                         help='Epipolar mask softness for vanilla+epipolar')
     parser.add_argument('--seed', type=int, default=42)
@@ -230,7 +232,7 @@ def main():
     all_pair_info = []  # list of (img0_path, img1_path, data_dir, K, scene_name)
 
     for scene in args.scenes:
-        data_dir = get_scene_dir(scene)
+        data_dir = get_scene_dir(scene, base=args.data_dir)
         all_imgs = sorted(glob.glob(f'{data_dir}/color/*.jpg'),
                           key=lambda x: int(os.path.basename(x).split('.')[0]))
         K_intr = np.loadtxt(f'{data_dir}/intrinsic/intrinsic_depth.txt')[:3, :3]
