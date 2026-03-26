@@ -82,8 +82,7 @@ def get_gt_matches(mkpts0, depth1_path, T1, T2, K):
     depth = depth.astype(np.float32) / 1000.0
 
     fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]], dtype=np.float64)
-    T_12 = T_cv2gl @ np.linalg.inv(T2) @ T1 @ T_cv2gl  # compute once
+    T_12 = np.linalg.inv(T2) @ T1  # relative transform: Camera 1 -> Camera 2
 
     x_idx = np.round(mkpts0[:, 0]).astype(int)
     y_idx = np.round(mkpts0[:, 1]).astype(int)
@@ -124,10 +123,7 @@ def evaluate_pair(img0_idx, img1_idx, all_imgs, data_dir, K, model, tau_values, 
 
     if not np.isfinite(T0).all() or not np.isfinite(T1).all(): return None
 
-    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-    T0_cv = T0 @ T_cv2gl
-    T1_cv = T1 @ T_cv2gl
-    F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
+    F_mat = compute_fundamental_matrix(T0, T1, K, K)
     t('F_mat computed')
 
     img0 = get_image_tensor(path0)
@@ -261,6 +257,7 @@ def main():
     print(f"{'Thr':<8} | {'Mean Err (px)':<15} | {'P@3px':<10} | {'P@5px':<10} | {'Avg Matches'}")
     print("-" * 65)
 
+    all_thr_results = {}
     for thr in thr_values:
         model.matcher.coarse_matching.thr = thr
         thr_results = []
@@ -268,15 +265,40 @@ def main():
             res = evaluate_pair(i, i + pair_gap, all_imgs, data_dir, K, model, [tau], device=device)
             if res is not None:
                 thr_results.append(res)
+        all_thr_results[thr] = thr_results
 
+    # ── Vanilla results ──────────────────────────────────────────────────────
+    for thr, thr_results in all_thr_results.items():
         if not thr_results:
             print(f"{thr:<8} | no matches")
             continue
-
         mean_err = np.mean([r['vanilla']['v_mean_err'] for r in thr_results])
         p3       = np.mean([r['vanilla']['v_p3']       for r in thr_results])
         p5       = np.mean([r['vanilla']['v_p5']       for r in thr_results])
         avg_m    = np.mean([r['vanilla']['v_total']    for r in thr_results])
+        print(f"{thr:<8} | {mean_err:<15.2f} | {p3:.2%}   | {p5:.2%}   | {avg_m:.1f}")
+
+    print("=" * 65)
+
+    # ── Vanilla + Epipolar results ───────────────────────────────────────────
+    print("\n" + "=" * 65)
+    print(f"VANILLA + EPIPOLAR RESULTS  (tau={tau} fixed)")
+    print("=" * 65)
+    print(f"{'Thr':<8} | {'Mean Err (px)':<15} | {'P@3px':<10} | {'P@5px':<10} | {'Avg Matches'}")
+    print("-" * 65)
+
+    for thr, thr_results in all_thr_results.items():
+        if not thr_results:
+            print(f"{thr:<8} | no matches")
+            continue
+        valid = [r for r in thr_results if tau in r['by_tau'] and r['by_tau'][tau]['c_total'] > 0]
+        if not valid:
+            print(f"{thr:<8} | no matches")
+            continue
+        mean_err = np.mean([r['by_tau'][tau]['c_mean_err'] for r in valid])
+        p3       = np.mean([r['by_tau'][tau]['c_p3']       for r in valid])
+        p5       = np.mean([r['by_tau'][tau]['c_p5']       for r in valid])
+        avg_m    = np.mean([r['by_tau'][tau]['c_total']    for r in valid])
         print(f"{thr:<8} | {mean_err:<15.2f} | {p3:.2%}   | {p5:.2%}   | {avg_m:.1f}")
 
     print("=" * 65)

@@ -47,8 +47,7 @@ def get_gt_matches(mkpts0, depth_path, T1, T2, K):
         return np.zeros(len(mkpts0), dtype=bool), np.zeros_like(mkpts0)
     depth = depth.astype(float) / 1000.0
     fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-    T_12 = T_cv2gl @ np.linalg.inv(T2) @ T1 @ T_cv2gl
+    T_12 = np.linalg.inv(T2) @ T1
     valid = np.zeros(len(mkpts0), dtype=bool)
     gt_pts = np.zeros_like(mkpts0)
     for i, pt in enumerate(mkpts0):

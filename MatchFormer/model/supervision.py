@@ -2,15 +2,6 @@ import torch
 import numpy as np
 
 
-# OpenGL -> OpenCV coordinate transform (ScanNet poses are camera-to-world in OpenGL)
-T_CV2GL = torch.tensor([
-    [1, 0, 0, 0],
-    [0, -1, 0, 0],
-    [0, 0, -1, 0],
-    [0, 0, 0, 1]
-], dtype=torch.float32)
-
-
 @torch.no_grad()
 def compute_supervision(data, config):
     """
@@ -19,8 +10,8 @@ def compute_supervision(data, config):
     Expects in data:
         'depth0'    [B, H, W]  depth in meters
         'K'         [B, 3, 3]  camera intrinsics
-        'T0'        [B, 4, 4]  camera-to-world pose (OpenGL convention)
-        'T1'        [B, 4, 4]  camera-to-world pose (OpenGL convention)
+        'T0'        [B, 4, 4]  camera-to-world pose
+        'T1'        [B, 4, 4]  camera-to-world pose
         'hw0_c'     (H_c, W_c) coarse feature grid size
         'hw0_i'     (H_i, W_i) input image size
 
@@ -40,8 +31,6 @@ def compute_supervision(data, config):
     T0 = data['T0'].to(device)       # [B, 4, 4]
     T1 = data['T1'].to(device)       # [B, 4, 4]
     depth0 = data['depth0'].to(device)  # [B, H, W]
-
-    T_gl = T_CV2GL.to(device)  # [4, 4]
 
     all_b_ids, all_i_ids, all_j_ids = [], [], []
 
@@ -67,7 +56,7 @@ def compute_supervision(data, config):
         if valid.sum() == 0:
             continue
 
-        # Unproject to 3D in Camera 0 space (OpenCV coords)
+        # Unproject to 3D in Camera 0 space
         xv = grid_x_flat[valid]
         yv = grid_y_flat[valid]
         zv = z[valid]
@@ -76,12 +65,8 @@ def compute_supervision(data, config):
         Y_c0 = (yv - cy) * zv / fy
         pts_c0 = torch.stack([X_c0, Y_c0, zv, torch.ones_like(zv)], dim=1)  # [M, 4]
 
-        # Convert OpenGL poses to OpenCV
-        T0_cv = T0[b] @ T_gl   # [4, 4]
-        T1_cv = T1[b] @ T_gl   # [4, 4]
-
         # Relative transform: Camera 0 -> World -> Camera 1
-        T_12 = torch.linalg.inv(T1_cv.float()) @ T0_cv.float()  # [4, 4]
+        T_12 = torch.linalg.inv(T1[b].float()) @ T0[b].float()  # [4, 4]
 
         # Transform points to Camera 1
         pts_c1 = (T_12 @ pts_c0.T).T  # [M, 4]

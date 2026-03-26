@@ -136,20 +136,14 @@ class EpipolarFineTuner(PL_LoFTR):
     def __init__(self, config, pretrained_ckpt=None, tau=10.0, freeze_backbone=True):
         super().__init__(config, pretrained_ckpt=pretrained_ckpt, freeze_backbone=freeze_backbone)
         self.tau = tau
-        self.T_cv2gl = torch.tensor([
-            [1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]
-        ], dtype=torch.float32)
 
     def _inject_epipolar(self, batch):
         """Compute F from first item in batch and inject into coarse_matching."""
         T0 = batch['T0'][0].cpu().numpy()
         T1 = batch['T1'][0].cpu().numpy()
         K  = batch['K'][0].cpu().numpy()
-        T_gl = self.T_cv2gl.numpy()
-        T0_cv = T0 @ T_gl
-        T1_cv = T1 @ T_gl
         try:
-            F_mat = compute_fundamental_matrix(T0_cv, T1_cv, K, K)
+            F_mat = compute_fundamental_matrix(T0, T1, K, K)
             self.matcher.coarse_matching.epipolar_F = F_mat
             self.matcher.coarse_matching.epipolar_tau = self.tau
         except Exception:
@@ -202,6 +196,8 @@ def main():
                         help='W&B project name.')
     parser.add_argument('--wandb_run',      default=None,
                         help='W&B run name. Auto-generated if not set.')
+    parser.add_argument('--split_seed',    type=int, default=42,
+                        help='Random seed for train/val split. Use the same seed locally to reproduce the split.')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -248,7 +244,9 @@ def main():
     else:
         n_val = max(1, int(len(dataset) * 0.1))
         n_train = len(dataset) - n_val
-        train_ds, val_ds = random_split(dataset, [n_train, n_val])
+        split_generator = torch.Generator().manual_seed(args.split_seed)
+        train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=split_generator)
+        print(f"Train/val split: {n_train}/{n_val} (seed={args.split_seed})")
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, collate_fn=collate_fn,

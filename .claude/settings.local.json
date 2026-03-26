@@ -1,7 +1,30 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python extract_scannet.py --scenes scene0012_00)"
+      "Bash(python extract_scannet.py --scenes scene0012_00)",
+      "Bash(source /Users/siddharthraj/classes/GSOC/susi_translator/venv/bin/activate)",
+      "Bash(python run_benchmark.py --ckpt model/weights/indoor-lite-LA.ckpt --data_dir ../data/scans/scene0013_00/exported --num_pairs 100)",
+      "Bash(tee /tmp/bench_vanilla_0013.txt)",
+      "Bash(for f:*)",
+      "Bash(do)",
+      "Bash(echo \"========== $f ==========\")",
+      "Bash(python3 -c \":*)",
+      "Bash(done)",
+      "Bash(python3 run_benchmark.py --ckpt model/weights/indoor-lite-LA.ckpt --data_dir ../data/scans/scene0011_00/exported --num_pairs 100)",
+      "Bash(tee benchmark_results/vanilla_scene0011.txt)",
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final -maxdepth 2 -name *.py -type f)",
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final/MatchFormer -name *.py -type f)",
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final/data/scans/scene001[1-5]_00 -type d)",
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final -name *.py -type f)",
+      "Bash(for scene:*)",
+      "Bash(do echo:*)",
+      "Read(//Users/siddharthraj/classes/cv/cv_final/data/scans/**)",
+      "Bash(for version:*)",
+      "Read(//Users/siddharthraj/classes/cv/cv_final/MatchFormer/lightning_logs/**)",
+      "Bash(xargs ls:*)",
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final -type f \\\\\\(-name *.py -o -name *.ipynb \\\\\\) -newermt 2026-03-01)",
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final -type f -name *analysis*)"
     ]
-  }
+  },
+  "model": "claude-opus-4-6"
 }

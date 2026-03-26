@@ -79,8 +79,7 @@ def get_gt_matches(mkpts0, depth_path, T1, T2, K):
         return np.zeros(len(mkpts0), dtype=bool), np.zeros_like(mkpts0)
     depth = depth.astype(np.float32) / 1000.0
     fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]], dtype=np.float64)
-    T_12 = T_cv2gl @ np.linalg.inv(T2) @ T1 @ T_cv2gl
+    T_12 = np.linalg.inv(T2) @ T1
     xi = np.round(mkpts0[:,0]).astype(int)
     yi = np.round(mkpts0[:,1]).astype(int)
     valid = (xi>=0)&(xi<depth.shape[1])&(yi>=0)&(yi<depth.shape[0])
@@ -118,8 +117,7 @@ def run_pair(idx0, idx1, all_imgs, data_dir, K, model, use_epipolar, thr, device
         return None
     if not (np.isfinite(T0).all() and np.isfinite(T1).all()): return None
 
-    T_cv2gl = np.array([[1,0,0,0],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
-    F_mat = compute_fundamental_matrix(T0 @ T_cv2gl, T1 @ T_cv2gl, K, K)
+    F_mat = compute_fundamental_matrix(T0, T1, K, K)
 
     img0 = get_image_tensor(all_imgs[idx0])
     img1 = get_image_tensor(all_imgs[idx1])

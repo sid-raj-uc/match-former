@@ -151,7 +151,8 @@ def error_auc(errors, thresholds):
         last_index = np.searchsorted(errors, thr)
         y = recall[:last_index] + [recall[last_index-1]]
         x = errors[:last_index] + [thr]
-        aucs.append(np.trapz(y, x) / thr)
+        _trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+        aucs.append(_trapz(y, x) / thr)
 
     return {f'auc@{t}': auc for t, auc in zip(thresholds, aucs)}
 

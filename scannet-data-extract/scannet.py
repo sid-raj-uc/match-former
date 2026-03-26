@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # Downloads ScanNet public data release
-# Run with ./download-scannet.py (or python download-scannet.py on Windows)
 # -*- coding: utf-8 -*-
+#python scannet.py -o /Users/siddharthraj/classes/cv/cv_final/data --id scene0012_00
 import argparse
 import os
 import urllib.request 
