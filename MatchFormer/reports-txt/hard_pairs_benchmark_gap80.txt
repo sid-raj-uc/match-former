@@ -1,0 +1,68 @@
+Hard Pairs Benchmark: Vanilla vs Vanilla+Epipolar
+==================================================
+Date: 2026-03-27
+Frame gap: 80
+Scenes: 13 (scene0000-scene0015, excluding scene0004, scene0009, scene0014)
+Pairs: 323 hard pairs (pose_err > 20°, >=20 vanilla matches, verified overlap)
+Model: indoor-lite-LA.ckpt (pretrained, no fine-tuning)
+Threshold: 0.2
+Tau: 10.0
+
+Pose AUC on HARD pairs:
+────────────────────────────────────────────────────────────────
+                    @5°      @10°     @20°
+  Vanilla:          0.00     0.00     0.00
+  Vanilla+Epipolar: 1.26     2.65     8.48
+  Delta:           +1.26    +2.65    +8.48
+────────────────────────────────────────────────────────────────
+
+Per-pair breakdown (threshold ±5°):
+  Epipolar HELPS:   127 pairs (39%)
+  Epipolar HURTS:    82 pairs (25%)
+  Similar:          114 pairs (35%)
+
+Median pose error:
+  Vanilla:          41.3°
+  Vanilla+Epipolar: 34.5°
+
+Hard pairs per scene:
+  scene0000_00:  32    scene0001_00:  13    scene0002_00:  53
+  scene0003_00:  20    scene0005_00:   5    scene0006_00:  16
+  scene0007_00:  10    scene0008_00:   1    scene0010_00:  15
+  scene0011_00:  11    scene0012_00: 133    scene0013_00:   7
+  scene0015_00:   7
+
+Top 10 biggest improvements (epipolar helps):
+  Scene            Pair        V_pose   E_pose   Delta    V_n   E_n
+  scene0011_00     487-567        inf°    19.2°     n/a   2156  1903
+  scene0012_00    2336-2416      81.6°     3.5°  +78.2°    902   620
+  scene0012_00    2531-2611      84.3°     7.8°  +76.5°    566   448
+  scene0001_00      95-175       75.7°     3.4°  +72.3°    527   417
+  scene0002_00    2067-2147      83.9°    14.1°  +69.9°    771   479
+  scene0012_00     873-953       79.1°    17.5°  +61.6°   1161   904
+  scene0012_00     862-942       82.3°    26.8°  +55.5°   1356  1043
+  scene0013_00     361-441       83.3°    35.0°  +48.2°    305   130
+  scene0012_00    1005-1085      73.1°    33.1°  +40.0°    462   292
+  scene0012_00    4556-4636      79.1°    40.0°  +39.1°    106    65
+
+Top 10 biggest degradations (epipolar hurts):
+  Scene            Pair        V_pose   E_pose   Delta    V_n   E_n
+  scene0002_00    4740-4820      36.9°      inf    n/a      25     4
+  scene0002_00    4059-4139      32.9°      inf    n/a      34     0
+  scene0012_00    2176-2256      67.4°      inf    n/a     708   481
+  scene0012_00    1624-1704      42.1°      inf    n/a      21     0
+  scene0012_00    2001-2081      36.5°      inf    n/a     164    83
+  scene0012_00    4989-5069      33.4°      inf    n/a     132     0
+  scene0012_00    1629-1709      32.0°      inf    n/a      27     0
+  scene0013_00     348-428      109.4°      inf    n/a     181     0
+  scene0013_00     654-734       88.0°      inf    n/a      28     2
+  scene0015_00    1540-1620      22.1°      inf    n/a      64     4
+
+Key findings:
+1. On hard pairs, vanilla AUC is literally 0% — the model fails completely.
+2. Epipolar constraint rescues 39% of hard pairs (127/323).
+3. When epipolar hurts, it's because the mask kills too many matches (E_n → 0).
+   A fallback (use vanilla when epipolar yields <5 matches) would fix most degradations.
+4. The biggest improvements are 70-80° reductions in pose error.
+5. Epipolar benefit is invisible in overall AUC (easy pairs dominate the average)
+   but critical for hard wide-baseline pairs.

@@ -71,11 +71,22 @@ class PL_LoFTR(pl.LightningModule):
                 for param in module.parameters():
                     param.requires_grad = True
 
+            # Freeze ALL BatchNorm running stats so pretrained statistics
+            # are preserved.  BN stats are updated via EMA during train-mode
+            # forward passes; on a small fine-tuning dataset they quickly
+            # overwrite the rich pretrained distribution, corrupting features.
+            for m in self.matcher.modules():
+                if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.SyncBatchNorm)):
+                    m.eval()           # keeps running_mean/var frozen during forward
+                    m.weight.requires_grad = False
+                    m.bias.requires_grad = False
+            config._freeze_bn = True
+
             n_train = sum(p.numel() for p in self.matcher.parameters() if p.requires_grad)
             n_total = sum(p.numel() for p in self.matcher.parameters())
             logger.info(f"Trainable params: {n_train:,} / {n_total:,} "
                         f"({100*n_train/n_total:.1f}%) — "
-                        f"AttentionBlock3, AttentionBlock4, fine FPN head")
+                        f"AttentionBlock3, AttentionBlock4, fine FPN head (BN frozen)")
         else:
             n_train = sum(p.numel() for p in self.matcher.parameters())
             n_total = n_train
@@ -104,6 +115,11 @@ class PL_LoFTR(pl.LightningModule):
         with torch.no_grad():
             self.matcher(batch)
         self.matcher.train()
+        # Keep BN in eval mode so running stats stay frozen
+        if getattr(self.config, '_freeze_bn', False):
+            for m in self.matcher.modules():
+                if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.SyncBatchNorm)):
+                    m.eval()
 
         # Step 2: Compute supervision labels (populates spv_b_ids/i_ids/j_ids)
         compute_supervision(batch, self.config)

@@ -1,7 +1,0 @@
-objc[8328]: Class AVFFrameReceiver is implemented in both /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/cv2/.dylibs/libavdevice.61.3.100.dylib (0x106bdc3a8) and /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/av/.dylibs/libavdevice.62.1.100.dylib (0x1236f43a8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
-objc[8328]: Class AVFAudioReceiver is implemented in both /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/cv2/.dylibs/libavdevice.61.3.100.dylib (0x106bdc3f8) and /Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/av/.dylibs/libavdevice.62.1.100.dylib (0x1236f43f8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
-/Users/siddharthraj/classes/GSOC/susi_translator/venv/lib/python3.12/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
-  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
-2026-03-18 14:51:21.220 | INFO     | model.lightning_loftr:__init__:50 - Load 'model/weights/epipolar-model.ckpt' as pretrained checkpoint
---- Running ScanNet Benchmark for 100 Pairs ---
-Pairs:   0%|          | 0/100 [00:00<?, ?pair/s]
