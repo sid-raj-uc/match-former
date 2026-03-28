@@ -40,3 +40,4 @@ Thumbs.db
 MatchFormer/model/weights/!MatchFormer/model/datasets/
 MatchFormer/model/weights/*.ckpt
 MatchFormer/lightning_logs/
+MatchFormer/Quad_Visual_Analysis_OOD.ipynb
