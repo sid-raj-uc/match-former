@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source /Users/siddharthraj/classes/cv/cv_final/myenv/bin/activate)",
+      "Bash(python benchmark_wxbs.py --data_dir /Users/siddharthraj/classes/cv/cv_final/data/WxBS_data_folder/v1.1)",
+      "Bash(python benchmark_model_only.py --data_dir ../data/scans/scene0000_00/exported --ckpt model/weights/indoor-lite-LA.ckpt)",
+      "Bash(wait)",
+      "Bash(kill -0 10367)"
+    ]
+  }
+}

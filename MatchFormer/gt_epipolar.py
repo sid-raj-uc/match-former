@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import cv2
+import torch
 
 # TUM dataset typical intrinsics for the fr1 sequences
 # K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
@@ -40,6 +41,61 @@ def compute_fundamental_matrix(pose1, pose2, K1, K2):
     # Normalize F
     F = F / F[2, 2]
     return F
+
+H_IMG, W_IMG = 480, 640
+
+
+def epipolar_distance_matrix(F_mat, H0, W0, H1, W1, device='cpu'):
+    """Compute pairwise epipolar distance matrix between coarse grids.
+
+    Returns [1, L, S] tensor of pixel distances from each img1 cell to the
+    epipolar line of each img0 cell.
+    """
+    y0, x0 = torch.meshgrid(torch.arange(H0), torch.arange(W0), indexing='ij')
+    x0_img = (x0.float() / W0) * W_IMG
+    y0_img = (y0.float() / H0) * H_IMG
+    y1, x1 = torch.meshgrid(torch.arange(H1), torch.arange(W1), indexing='ij')
+    x1_img = (x1.float() / W1) * W_IMG
+    y1_img = (y1.float() / H1) * H_IMG
+
+    p0 = torch.stack([x0_img.flatten(), y0_img.flatten(),
+                       torch.ones_like(x0_img.flatten())], dim=1).to(device)
+    p1 = torch.stack([x1_img.flatten(), y1_img.flatten(),
+                       torch.ones_like(x1_img.flatten())], dim=1).to(device)
+    F_t = torch.tensor(F_mat, dtype=torch.float32, device=device)
+
+    l_prime = p0 @ F_t.T                                   # [L, 3]
+    num = torch.abs(l_prime @ p1.T)                         # [L, S]
+    denom = torch.sqrt(l_prime[:, 0]**2 + l_prime[:, 1]**2).unsqueeze(1)
+    distances = num / (denom + 1e-8)                        # [L, S]
+    return distances.unsqueeze(0)                            # [1, L, S]
+
+
+def get_epipolar_mask(F_mat, H0, W0, H1, W1, tau=10.0,
+                      mode='laplacian', device='cpu'):
+    """Soft epipolar mask with selectable decay.
+
+    Args:
+        mode: 'laplacian' — exp(-d / tau)   (current default)
+              'gaussian'  — exp(-d² / (2 tau²))
+              'hard'      — 1 if d < tau else 0
+
+    Returns [1, L, S] mask.
+    """
+    distances = epipolar_distance_matrix(
+        F_mat, H0, W0, H1, W1, device=device).squeeze(0)
+
+    if mode == 'laplacian':
+        mask = torch.exp(-distances / tau)
+    elif mode == 'gaussian':
+        mask = torch.exp(-distances**2 / (2 * tau**2))
+    elif mode == 'hard':
+        mask = (distances < tau).float()
+    else:
+        raise ValueError(f"Unknown mode '{mode}', use laplacian/gaussian/hard")
+
+    return mask.unsqueeze(0)
+
 
 def read_trajectory(filename):
     """

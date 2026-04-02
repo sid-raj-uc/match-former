@@ -170,6 +170,9 @@ def main():
     parser.add_argument('--batch',          type=int, default=2)
     parser.add_argument('--workers',        type=int, default=2)
     parser.add_argument('--frame_gap',      type=int, default=20)
+    parser.add_argument('--random_gap',     type=str, default=None,
+                        help='Random gap range as "min,max" (e.g. "10,60"). '
+                             'Overrides --frame_gap. Each pair samples a random gap per epoch.')
     parser.add_argument('--resume',         default=None,
                         help='Path to checkpoint to resume from. If not set, '
                              'auto-resumes from last.ckpt in --checkpoint_dir if it exists.')
@@ -234,10 +237,16 @@ def main():
 
     # ── Dataset ─────────────────────────────────────────────────────────────
     max_pairs = 5 if args.overfit else None
+    random_gap_range = None
+    if args.random_gap:
+        parts = args.random_gap.split(',')
+        random_gap_range = (int(parts[0]), int(parts[1]))
+        print(f'Random gap range: {random_gap_range}')
     dataset = ScanNetSimpleDataset(
-        args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs
+        args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs,
+        random_gap_range=random_gap_range,
     )
-    print(f"Dataset: {len(dataset)} pairs")
+    print(f"Dataset: {len(dataset)} {'source frames' if random_gap_range else 'pairs'}")
 
     if args.overfit:
         train_ds, val_ds = dataset, dataset
@@ -295,6 +304,7 @@ def main():
                 'tau': args.tau,
                 'neg_per_pos': args.neg_per_pos,
 'frame_gap': args.frame_gap,
+                'random_gap': args.random_gap,
                 'precision': precision,
                 'resume': resume_path,
             },

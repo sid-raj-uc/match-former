@@ -23,7 +23,9 @@
       "Read(//Users/siddharthraj/classes/cv/cv_final/MatchFormer/lightning_logs/**)",
       "Bash(xargs ls:*)",
       "Bash(find /Users/siddharthraj/classes/cv/cv_final -type f \\\\\\(-name *.py -o -name *.ipynb \\\\\\) -newermt 2026-03-01)",
-      "Bash(find /Users/siddharthraj/classes/cv/cv_final -type f -name *analysis*)"
+      "Bash(find /Users/siddharthraj/classes/cv/cv_final -type f -name *analysis*)",
+      "Bash(python3:*)",
+      "Bash(python:*)"
     ]
   },
   "model": "claude-opus-4-6"
