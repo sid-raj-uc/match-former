@@ -78,11 +78,20 @@ def epipolar_coarse_forward(self, feat_c0, feat_c1, data, mask_c0=None, mask_c1=
         sim_matrix.masked_fill_(~(mask_c0[..., None] * mask_c1[:, None]).bool(), -1e9)
     conf_matrix = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
 
-    if getattr(self, 'epipolar_F', None) is not None:
+    # Apply per-pair epipolar masks (one F matrix per batch element)
+    epipolar_F_list = getattr(self, 'epipolar_F_list', None)
+    if epipolar_F_list is not None:
         tau = getattr(self, 'epipolar_tau', 10.0)
         H0, W0 = data['hw0_c']
         H1, W1 = data['hw1_c']
-        epi_mask = get_epipolar_mask_matrix(self.epipolar_F, H0, W0, H1, W1, tau=tau, device=conf_matrix.device)
+        masks = []
+        for i in range(N):
+            if i < len(epipolar_F_list) and epipolar_F_list[i] is not None:
+                m = get_epipolar_mask_matrix(epipolar_F_list[i], H0, W0, H1, W1, tau=tau, device=conf_matrix.device)
+                masks.append(m.squeeze(0))  # [L, S]
+            else:
+                masks.append(torch.ones(L, S, device=conf_matrix.device))
+        epi_mask = torch.stack(masks, dim=0)  # [N, L, S]
         conf_matrix = conf_matrix * epi_mask
 
     data.update({'conf_matrix': conf_matrix, 'sim_matrix': sim_matrix})
@@ -138,16 +147,19 @@ class EpipolarFineTuner(PL_LoFTR):
         self.tau = tau
 
     def _inject_epipolar(self, batch):
-        """Compute F from first item in batch and inject into coarse_matching."""
-        T0 = batch['T0'][0].cpu().numpy()
-        T1 = batch['T1'][0].cpu().numpy()
-        K  = batch['K'][0].cpu().numpy()
-        try:
-            F_mat = compute_fundamental_matrix(T0, T1, K, K)
-            self.matcher.coarse_matching.epipolar_F = F_mat
-            self.matcher.coarse_matching.epipolar_tau = self.tau
-        except Exception:
-            self.matcher.coarse_matching.epipolar_F = None
+        """Compute F for each pair in the batch and inject into coarse_matching."""
+        B = batch['T0'].shape[0]
+        F_list = []
+        for i in range(B):
+            T0 = batch['T0'][i].cpu().numpy()
+            T1 = batch['T1'][i].cpu().numpy()
+            K  = batch['K'][i].cpu().numpy()
+            try:
+                F_list.append(compute_fundamental_matrix(T0, T1, K, K))
+            except Exception:
+                F_list.append(None)
+        self.matcher.coarse_matching.epipolar_F_list = F_list
+        self.matcher.coarse_matching.epipolar_tau = self.tau
 
     def training_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
