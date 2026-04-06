@@ -14,7 +14,7 @@ class FocalLoss(nn.Module):
     negative-to-positive gradient ratio at 2*neg_per_pos:1 regardless of how many
     scenes are in the batch, preventing confidence collapse during multi-scene training.
     """
-    def __init__(self, alpha=0.5, gamma=2.0, neg_per_pos=0):
+    def __init__(self, alpha=0.25, gamma=2.0, neg_per_pos=0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -97,7 +97,7 @@ def fine_loss(data):
 class MatchFormerLoss(nn.Module):
     def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0):
         super().__init__()
-        self.focal = FocalLoss(alpha=0.5, gamma=2.0, neg_per_pos=neg_per_pos)
+        self.focal = FocalLoss(alpha=0.25, gamma=2.0, neg_per_pos=neg_per_pos)
         self.lambda_c = lambda_c
         self.lambda_f = lambda_f
 

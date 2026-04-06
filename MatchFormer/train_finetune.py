@@ -62,7 +62,7 @@ def get_epipolar_mask_matrix(F_mat, H0, W0, H1, W1, H_img=480, W_img=640, tau=10
         d_chunk = denom[start:end]            # [chunk, 1]
         num_chunk = torch.abs(l_chunk @ p1.T) # [chunk, N1]
         dist_chunk = num_chunk / (d_chunk + 1e-8)
-        mask_rows.append(torch.exp(-dist_chunk / tau))
+        mask_rows.append(torch.exp(-dist_chunk**2 / (2 * tau**2)))
     mask = torch.cat(mask_rows, dim=0)  # [N0, N1]
     return mask.unsqueeze(0)  # [1, N0, N1]
 
@@ -201,6 +201,14 @@ def main():
                         help='W&B run name. Auto-generated if not set.')
     parser.add_argument('--split_seed',    type=int, default=42,
                         help='Random seed for train/val split. Use the same seed locally to reproduce the split.')
+    parser.add_argument('--scenes',       nargs='+', default=None,
+                        help='Scene names to train on (e.g. scene0000_00 scene0001_00). '
+                             'If not set, uses all scenes in data_dir.')
+    parser.add_argument('--split_ratio',  type=float, default=0.9,
+                        help='Fraction of frames per scene for training (default: 0.9). '
+                             'First 90%% = train, last 10%% = test.')
+    parser.add_argument('--eta_min',      type=float, default=1e-6,
+                        help='Minimum LR for CosineAnnealingLR scheduler.')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -233,6 +241,7 @@ def main():
     config.LOSS_LAMBDA_C  = 1.0
     config.LOSS_LAMBDA_F  = 0.5
     config.NEG_PER_POS    = args.neg_per_pos
+    config.ETA_MIN        = args.eta_min
 
 
     # ── Dataset ─────────────────────────────────────────────────────────────
@@ -242,20 +251,26 @@ def main():
         parts = args.random_gap.split(',')
         random_gap_range = (int(parts[0]), int(parts[1]))
         print(f'Random gap range: {random_gap_range}')
-    dataset = ScanNetSimpleDataset(
-        args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs,
-        random_gap_range=random_gap_range,
-    )
-    print(f"Dataset: {len(dataset)} {'source frames' if random_gap_range else 'pairs'}")
 
     if args.overfit:
+        dataset = ScanNetSimpleDataset(
+            args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs,
+            random_gap_range=random_gap_range, scenes=args.scenes,
+        )
         train_ds, val_ds = dataset, dataset
+        print(f"Overfit mode: {len(dataset)} pairs")
     else:
-        n_val = max(1, int(len(dataset) * 0.1))
-        n_train = len(dataset) - n_val
-        split_generator = torch.Generator().manual_seed(args.split_seed)
-        train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=split_generator)
-        print(f"Train/val split: {n_train}/{n_val} (seed={args.split_seed})")
+        train_ds = ScanNetSimpleDataset(
+            args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs,
+            random_gap_range=random_gap_range, scenes=args.scenes,
+            split='train', split_ratio=args.split_ratio,
+        )
+        val_ds = ScanNetSimpleDataset(
+            args.data_dir, frame_gap=args.frame_gap, max_pairs=None,
+            random_gap_range=random_gap_range, scenes=args.scenes,
+            split='test', split_ratio=args.split_ratio,
+        )
+        print(f"Train: {len(train_ds)} | Val: {len(val_ds)} (per-scene {args.split_ratio:.0%}/{1-args.split_ratio:.0%} split)")
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, collate_fn=collate_fn,

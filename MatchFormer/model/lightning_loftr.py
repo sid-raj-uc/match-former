@@ -99,8 +99,9 @@ class PL_LoFTR(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
+        eta_min = getattr(self.config, 'ETA_MIN', 1e-6)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.total_steps, eta_min=1e-6
+            optimizer, T_max=self.total_steps, eta_min=eta_min
         )
         return {
             'optimizer': optimizer,

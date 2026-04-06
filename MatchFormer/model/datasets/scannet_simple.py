@@ -28,16 +28,28 @@ class ScanNetSimpleDataset(Dataset):
             gap uniformly from [min_gap, max_gap] per pair at each __getitem__.
             If None, uses fixed frame_gap. Pairs are indexed by source frame;
             the target frame is sampled on the fly.
+        scenes (list[str] | None): list of scene names to include (e.g. ['scene0000_00', 'scene0001_00']).
+            If None, uses all scenes found.
+        split (str): 'train', 'test', or 'all'. Per-scene split based on frame index order.
+        split_ratio (float): fraction of frames per scene used for training (default: 0.9).
     """
 
     def __init__(self, data_dir, frame_gap=20, img_size=(640, 480), max_pairs=None,
-                 random_gap_range=None):
+                 random_gap_range=None, scenes=None, split='all', split_ratio=0.9):
         self.frame_gap = frame_gap
         self.img_size  = img_size
         self.random_gap_range = random_gap_range
 
         scene_dirs = self._resolve_scene_dirs(data_dir)
-        print(f'  Scenes found: {len(scene_dirs)}')
+
+        # Filter to requested scenes
+        if scenes is not None:
+            scene_dirs = [d for d in scene_dirs
+                          if any(s in d for s in scenes)]
+
+        print(f'  Scenes found: {len(scene_dirs)} (split={split}, ratio={split_ratio})')
+        self.split = split
+        self.split_ratio = split_ratio
 
         if random_gap_range is not None:
             self.frames = []
@@ -84,6 +96,16 @@ class ScanNetSimpleDataset(Dataset):
                 candidates.append(os.path.join(data_dir, entry))
         return candidates
 
+    def _get_split_range(self, n_frames):
+        """Return (start, end) indices for the current split."""
+        split_idx = int(n_frames * self.split_ratio)
+        if self.split == 'train':
+            return 0, split_idx
+        elif self.split == 'test':
+            return split_idx, n_frames
+        else:
+            return 0, n_frames
+
     def _build_frames(self, scene_dir, max_gap):
         """Build list of source frames that have valid pose/depth and at least
         max_gap frames ahead of them."""
@@ -95,8 +117,10 @@ class ScanNetSimpleDataset(Dataset):
             key=lambda x: int(os.path.basename(x).split('.')[0])
         )
 
+        start, end = self._get_split_range(len(color_paths))
+
         frames = []
-        for i in range(len(color_paths) - max_gap):
+        for i in range(max(start, 0), min(end, len(color_paths) - max_gap)):
             idx = os.path.basename(color_paths[i]).split('.')[0]
             pose = os.path.join(scene_dir, 'pose', f'{idx}.txt')
             depth = os.path.join(scene_dir, 'depth', f'{idx}.png')
@@ -119,10 +143,17 @@ class ScanNetSimpleDataset(Dataset):
             key=lambda x: int(os.path.basename(x).split('.')[0])
         )
 
+        start, end = self._get_split_range(len(color_paths))
+
         pairs = []
-        for i in range(len(color_paths) - self.frame_gap):
+        for i in range(max(start, 0), min(end, len(color_paths)) - self.frame_gap):
+            # Ensure the target frame is also within the split range
+            j = i + self.frame_gap
+            if j >= end:
+                continue
+
             idx0 = os.path.basename(color_paths[i]).split('.')[0]
-            idx1 = os.path.basename(color_paths[i + self.frame_gap]).split('.')[0]
+            idx1 = os.path.basename(color_paths[j]).split('.')[0]
 
             pose0  = os.path.join(scene_dir, 'pose',  f'{idx0}.txt')
             pose1  = os.path.join(scene_dir, 'pose',  f'{idx1}.txt')
@@ -135,7 +166,7 @@ class ScanNetSimpleDataset(Dataset):
 
             pairs.append({
                 'img0_path':   color_paths[i],
-                'img1_path':   color_paths[i + self.frame_gap],
+                'img1_path':   color_paths[j],
                 'depth0_path': depth0,
                 'pose0_path':  pose0,
                 'pose1_path':  pose1,
