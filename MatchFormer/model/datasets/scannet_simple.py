@@ -164,6 +164,12 @@ class ScanNetSimpleDataset(Dataset):
             if not os.path.exists(depth0):
                 continue
 
+            # Skip pairs with invalid (nan/inf) poses
+            T0 = np.loadtxt(pose0)
+            T1 = np.loadtxt(pose1)
+            if not np.isfinite(T0).all() or not np.isfinite(T1).all():
+                continue
+
             pairs.append({
                 'img0_path':   color_paths[i],
                 'img1_path':   color_paths[j],

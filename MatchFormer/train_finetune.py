@@ -22,6 +22,7 @@ import re
 import glob
 import sys
 import argparse
+import numpy as np
 import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
@@ -155,7 +156,14 @@ class EpipolarFineTuner(PL_LoFTR):
             T1 = batch['T1'][i].cpu().numpy()
             K  = batch['K'][i].cpu().numpy()
             try:
-                F_list.append(compute_fundamental_matrix(T0, T1, K, K))
+                if not np.isfinite(T0).all() or not np.isfinite(T1).all():
+                    F_list.append(None)
+                    continue
+                F_mat = compute_fundamental_matrix(T0, T1, K, K)
+                if not np.isfinite(F_mat).all():
+                    F_list.append(None)
+                    continue
+                F_list.append(F_mat)
             except Exception:
                 F_list.append(None)
         self.matcher.coarse_matching.epipolar_F_list = F_list
