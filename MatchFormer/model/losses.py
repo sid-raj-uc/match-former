@@ -49,11 +49,14 @@ class FocalLoss(nn.Module):
     def forward(self, conf_matrix, b_ids, i_ids, j_ids, weight_pos=1.0):
         device = conf_matrix.device
 
-        pos_mask = torch.zeros_like(conf_matrix)
-        if len(b_ids) > 0:
-            pos_mask[b_ids, i_ids, j_ids] = 1.0
+        # No GT matches → no meaningful loss
+        if len(b_ids) == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
 
-        if self.neg_per_pos > 0 and len(b_ids) > 0:
+        pos_mask = torch.zeros_like(conf_matrix)
+        pos_mask[b_ids, i_ids, j_ids] = 1.0
+
+        if self.neg_per_pos > 0:
             neg_sample = self._sample_neg_mask(conf_matrix, b_ids, i_ids, j_ids)
             neg_mask = neg_sample.float() * (1.0 - pos_mask)
         else:
@@ -63,7 +66,7 @@ class FocalLoss(nn.Module):
         loss_pos = -self.alpha * (1 - p) ** self.gamma * torch.log(p) * pos_mask
         loss_neg = -(1 - self.alpha) * p ** self.gamma * torch.log(1 - p) * neg_mask
 
-        loss = (weight_pos * loss_pos + loss_neg).sum() / (pos_mask.sum() + 1e-8)
+        loss = (weight_pos * loss_pos + loss_neg).sum() / pos_mask.sum()
         return loss
 
 
