@@ -133,6 +133,7 @@ class EpipolarFineTuner(PL_LoFTR):
         self.tau = tau
         self.lambda_epi = lambda_epi
         self._current_F_list = None  # stored per batch for loss computation
+        self._val_losses = []  # accumulate val losses manually
 
     def _inject_epipolar(self, batch):
         """Compute F for each pair in the batch and inject into coarse_matching."""
@@ -175,6 +176,9 @@ class EpipolarFineTuner(PL_LoFTR):
 
     def training_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
+
+        if batch_idx == 0:
+            print(f"[TRAIN DEBUG] lambda_epi={self.lambda_epi}, F_list={self._current_F_list is not None}")
 
         if self.lambda_epi <= 0 or self._current_F_list is None:
             return super().training_step(batch, batch_idx)
@@ -251,22 +255,44 @@ class EpipolarFineTuner(PL_LoFTR):
         # SCENES coarse term
         conf_matrix = batch.get('conf_matrix')
         epi_mask = self._compute_epi_mask(batch)
+        if batch_idx == 0:
+            print(f"[VAL DEBUG] conf_matrix: {conf_matrix is not None}, epi_mask: {epi_mask is not None}")
+            if conf_matrix is not None:
+                print(f"[VAL DEBUG] conf_matrix shape: {conf_matrix.shape}, max: {conf_matrix.max().item():.6f}")
+            if epi_mask is not None:
+                print(f"[VAL DEBUG] epi_mask shape: {epi_mask.shape}, max: {epi_mask.max().item():.4f}, positives: {(epi_mask > 0.5).sum().item()}")
         if conf_matrix is not None and epi_mask is not None:
             loss_coarse_epi = epipolar_coarse_loss(conf_matrix, epi_mask)
             loss_total = loss_total + (1 - self.lambda_epi) * loss_coarse_epi
             self.log('val/loss_coarse_epi', loss_coarse_epi.detach(), on_step=False, on_epoch=True)
+            if batch_idx == 0:
+                print(f"[VAL DEBUG] loss_coarse_epi: {loss_coarse_epi.item():.6f}")
 
         # SCENES fine term
         mkpts0 = batch.get('mkpts0_f')
         mkpts1 = batch.get('mkpts1_f')
         m_bids = batch.get('m_bids')
+        if batch_idx == 0:
+            print(f"[VAL DEBUG] mkpts0_f: {mkpts0 is not None}, len: {len(mkpts0) if mkpts0 is not None else 0}")
         if mkpts0 is not None and len(mkpts0) > 0:
             loss_sampson = sampson_epipolar_loss(mkpts0, mkpts1, self._current_F_list, m_bids)
             loss_total = loss_total + self.lambda_epi * loss_sampson
             self.log('val/loss_sampson', loss_sampson.detach(), on_step=False, on_epoch=True)
+            if batch_idx == 0:
+                print(f"[VAL DEBUG] loss_sampson: {loss_sampson.item():.6f}")
 
-        self.log('val/loss', loss_total.detach(), on_step=False, on_epoch=True, prog_bar=True)
+        if batch_idx == 0:
+            print(f"[VAL DEBUG] loss_total: {loss_total.item():.6f}")
+        self._val_losses.append(loss_total.detach().item())
         return loss_total
+
+    def on_validation_epoch_end(self):
+        if self._val_losses:
+            avg = sum(self._val_losses) / len(self._val_losses)
+            self.log('val/loss', avg, prog_bar=True)
+            self.log('val/loss_total_scenes', avg)
+            print(f"[VAL] epoch avg loss: {avg:.6f} ({len(self._val_losses)} batches)")
+            self._val_losses.clear()
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
