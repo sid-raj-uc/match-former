@@ -201,7 +201,8 @@ class EpipolarFineTuner(PL_LoFTR):
             loss_total = loss_total + self.lambda_epi * loss_sampson
             self.log('train/loss_sampson', loss_sampson.detach(), on_step=True, on_epoch=True)
 
-        self.log('train/loss_scenes', loss_total.detach(), on_step=True, on_epoch=True)
+        # Overwrite train/loss with the actual total (super logged only standard part)
+        self.log('train/loss', loss_total.detach(), on_step=True, on_epoch=True, prog_bar=True)
         return loss_total
 
     def validation_step(self, batch, batch_idx):
@@ -228,7 +229,8 @@ class EpipolarFineTuner(PL_LoFTR):
             loss_total = loss_total + self.lambda_epi * loss_sampson
             self.log('val/loss_sampson', loss_sampson.detach(), on_step=False, on_epoch=True)
 
-        self.log('val/loss_scenes', loss_total.detach(), on_step=False, on_epoch=True)
+        # Overwrite val/loss with the actual total (super logged only standard part)
+        self.log('val/loss', loss_total.detach(), on_step=False, on_epoch=True, prog_bar=True)
         return loss_total
 
 
