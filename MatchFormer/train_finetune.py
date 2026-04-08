@@ -230,6 +230,14 @@ class EpipolarFineTuner(PL_LoFTR):
         self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
         self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
 
+        # Match and confidence stats
+        b_ids = batch.get('b_ids')
+        if b_ids is not None:
+            self.log('train/num_matches', float(len(b_ids)), on_step=True, on_epoch=False)
+        mkpts0 = batch.get('mkpts0_f')
+        if mkpts0 is not None:
+            self.log('train/num_fine_matches', float(len(mkpts0)), on_step=True, on_epoch=False)
+
         conf = batch.get('conf_matrix')
         if conf is not None:
             self.log('train/conf_max', conf.max().item(), on_step=True, on_epoch=False)
