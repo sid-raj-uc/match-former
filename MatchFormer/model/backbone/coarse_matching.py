@@ -204,6 +204,14 @@ class CoarseMatching(nn.Module):
                 j_ids = j_ids[pred_indices]
                 mconf = mconf[pred_indices]
 
+            # If still no matches (no GT + no predictions), create a dummy
+            # match so fine_matching doesn't crash on its M>0 assertion.
+            if len(b_ids) == 0:
+                b_ids = torch.zeros(1, dtype=torch.long, device=_device)
+                i_ids = torch.zeros(1, dtype=torch.long, device=_device)
+                j_ids = torch.zeros(1, dtype=torch.long, device=_device)
+                mconf = torch.zeros(1, device=_device)
+
         # These matches select patches that feed into fine-level network
         coarse_matches = {'b_ids': b_ids, 'i_ids': i_ids, 'j_ids': j_ids}
 
