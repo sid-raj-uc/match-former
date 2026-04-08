@@ -176,15 +176,36 @@ class EpipolarFineTuner(PL_LoFTR):
     def training_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
 
-        # Standard forward (populates conf_matrix, mkpts0_f, etc.)
-        loss_standard = super().training_step(batch, batch_idx)
-
         if self.lambda_epi <= 0 or self._current_F_list is None:
-            return loss_standard
+            return super().training_step(batch, batch_idx)
 
-        loss_total = loss_standard  # 0 on MH_05 (no depth), nonzero on ScanNet
+        # Run the full forward ourselves (avoid super's logging so we can log total)
+        # Step 1: eval-mode forward to populate hw0_c etc.
+        self.matcher.eval()
+        with torch.no_grad():
+            self.matcher(batch)
+        self.matcher.train()
+        if getattr(self.config, '_freeze_bn', False):
+            for m in self.matcher.modules():
+                if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.SyncBatchNorm)):
+                    m.eval()
 
-        # --- SCENES coarse term: focal loss with epipolar mask as pseudo-GT ---
+        # Step 2: supervision (empty on MH_05)
+        from model.supervision import compute_supervision
+        compute_supervision(batch, self.config)
+
+        # Step 3: clear and re-forward
+        for key in ['conf_matrix', 'sim_matrix', 'b_ids', 'i_ids', 'j_ids', 'gt_mask',
+                    'm_bids', 'mkpts0_c', 'mkpts1_c', 'mconf',
+                    'expec_f', 'mkpts0_f', 'mkpts1_f']:
+            batch.pop(key, None)
+        self.matcher(batch)
+
+        # Step 4: standard losses (0 on MH_05)
+        losses = self.criterion(batch)
+        loss_total = losses['loss']
+
+        # Step 5: SCENES coarse term
         conf_matrix = batch.get('conf_matrix')
         epi_mask = self._compute_epi_mask(batch)
         if conf_matrix is not None and epi_mask is not None:
@@ -192,7 +213,7 @@ class EpipolarFineTuner(PL_LoFTR):
             loss_total = loss_total + (1 - self.lambda_epi) * loss_coarse_epi
             self.log('train/loss_coarse_epi', loss_coarse_epi.detach(), on_step=True, on_epoch=True)
 
-        # --- SCENES fine term: Sampson distance on predicted matches ---
+        # Step 6: SCENES fine term
         mkpts0 = batch.get('mkpts0_f')
         mkpts1 = batch.get('mkpts1_f')
         m_bids = batch.get('m_bids')
@@ -201,19 +222,33 @@ class EpipolarFineTuner(PL_LoFTR):
             loss_total = loss_total + self.lambda_epi * loss_sampson
             self.log('train/loss_sampson', loss_sampson.detach(), on_step=True, on_epoch=True)
 
-        # Overwrite train/loss with the actual total (super logged only standard part)
-        self.log('train/loss', loss_total.detach(), on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss', loss_total, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
+        self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
+
+        conf = batch.get('conf_matrix')
+        if conf is not None:
+            self.log('train/conf_max', conf.max().item(), on_step=True, on_epoch=False)
+            self.log('train/conf_mean', conf.mean().item(), on_step=True, on_epoch=False)
+
         return loss_total
 
     def validation_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
-        loss_standard = super().validation_step(batch, batch_idx)
 
         if self.lambda_epi <= 0 or self._current_F_list is None:
-            return loss_standard
+            return super().validation_step(batch, batch_idx)
 
-        loss_total = loss_standard
+        # Run forward pass ourselves (don't call super to avoid double-logging)
+        from model.supervision import compute_supervision
+        compute_supervision(batch, self.config)
+        self.matcher(batch)
 
+        # Standard losses (0 on MH_05)
+        losses = self.criterion(batch)
+        loss_total = losses['loss']
+
+        # SCENES coarse term
         conf_matrix = batch.get('conf_matrix')
         epi_mask = self._compute_epi_mask(batch)
         if conf_matrix is not None and epi_mask is not None:
@@ -221,6 +256,7 @@ class EpipolarFineTuner(PL_LoFTR):
             loss_total = loss_total + (1 - self.lambda_epi) * loss_coarse_epi
             self.log('val/loss_coarse_epi', loss_coarse_epi.detach(), on_step=False, on_epoch=True)
 
+        # SCENES fine term
         mkpts0 = batch.get('mkpts0_f')
         mkpts1 = batch.get('mkpts1_f')
         m_bids = batch.get('m_bids')
@@ -229,7 +265,6 @@ class EpipolarFineTuner(PL_LoFTR):
             loss_total = loss_total + self.lambda_epi * loss_sampson
             self.log('val/loss_sampson', loss_sampson.detach(), on_step=False, on_epoch=True)
 
-        # Overwrite val/loss with the actual total (super logged only standard part)
         self.log('val/loss', loss_total.detach(), on_step=False, on_epoch=True, prog_bar=True)
         return loss_total
 
