@@ -35,7 +35,8 @@ class ScanNetSimpleDataset(Dataset):
     """
 
     def __init__(self, data_dir, frame_gap=20, img_size=(640, 480), max_pairs=None,
-                 random_gap_range=None, scenes=None, split='all', split_ratio=0.9):
+                 random_gap_range=None, scenes=None, split='all', split_ratio=0.9,
+                 split_mode='sequential', split_seed=42):
         self.frame_gap = frame_gap
         self.img_size  = img_size
         self.random_gap_range = random_gap_range
@@ -47,9 +48,11 @@ class ScanNetSimpleDataset(Dataset):
             scene_dirs = [d for d in scene_dirs
                           if any(s in d for s in scenes)]
 
-        print(f'  Scenes found: {len(scene_dirs)} (split={split}, ratio={split_ratio})')
+        print(f'  Scenes found: {len(scene_dirs)} (split={split}, ratio={split_ratio}, mode={split_mode})')
         self.split = split
         self.split_ratio = split_ratio
+        self.split_mode = split_mode
+        self.split_seed = split_seed
 
         if random_gap_range is not None:
             self.frames = []
@@ -75,6 +78,17 @@ class ScanNetSimpleDataset(Dataset):
                 if max_pairs and len(self.pairs) >= max_pairs:
                     self.pairs = self.pairs[:max_pairs]
                     break
+
+            # Random split: shuffle all pairs, then take train/test portions
+            if split_mode == 'random' and split != 'all':
+                rng = np.random.RandomState(self.split_seed)
+                indices = rng.permutation(len(self.pairs))
+                split_idx = int(len(self.pairs) * self.split_ratio)
+                if split == 'train':
+                    self.pairs = [self.pairs[i] for i in indices[:split_idx]]
+                else:  # test
+                    self.pairs = [self.pairs[i] for i in indices[split_idx:]]
+
             print(f'  Total pairs: {len(self.pairs)}')
 
     @staticmethod
@@ -143,7 +157,11 @@ class ScanNetSimpleDataset(Dataset):
             key=lambda x: int(os.path.basename(x).split('.')[0])
         )
 
-        start, end = self._get_split_range(len(color_paths))
+        # Random split mode: use all frames, splitting happens after pair building
+        if self.split_mode == 'random':
+            start, end = 0, len(color_paths)
+        else:
+            start, end = self._get_split_range(len(color_paths))
 
         pairs = []
         for i in range(max(start, 0), min(end, len(color_paths)) - self.frame_gap):

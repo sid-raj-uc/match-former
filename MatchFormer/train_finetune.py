@@ -346,6 +346,10 @@ def main():
                              'First 90%% = train, last 10%% = test.')
     parser.add_argument('--eta_min',      type=float, default=1e-6,
                         help='Minimum LR for CosineAnnealingLR scheduler.')
+    parser.add_argument('--split_mode',  default='sequential',
+                        choices=['sequential', 'random'],
+                        help='How to split train/test. sequential: first 90%% frames train, last 10%% test. '
+                             'random: shuffle all pairs, then split 90/10.')
     parser.add_argument('--lambda_epi',  type=float, default=0.0,
                         help='Weight for Sampson epipolar loss on predicted matches. '
                              '0 = disabled. Try 0.1-0.5 for Phase 2.')
@@ -404,11 +408,13 @@ def main():
             args.data_dir, frame_gap=args.frame_gap, max_pairs=max_pairs,
             random_gap_range=random_gap_range, scenes=args.scenes,
             split='train', split_ratio=args.split_ratio,
+            split_mode=args.split_mode, split_seed=args.split_seed,
         )
         val_ds = ScanNetSimpleDataset(
             args.data_dir, frame_gap=args.frame_gap, max_pairs=None,
             random_gap_range=random_gap_range, scenes=args.scenes,
             split='test', split_ratio=args.split_ratio,
+            split_mode=args.split_mode, split_seed=args.split_seed,
         )
         print(f"Train: {len(train_ds)} | Val: {len(val_ds)} (per-scene {args.split_ratio:.0%}/{1-args.split_ratio:.0%} split)")
 
