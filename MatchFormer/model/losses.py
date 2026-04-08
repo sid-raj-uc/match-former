@@ -97,6 +97,82 @@ def fine_loss(data):
     return loss
 
 
+def epipolar_coarse_loss(conf_matrix, epi_mask, alpha=0.25, gamma=2.0):
+    """
+    SCENES-style coarse loss: focal loss using epipolar mask as pseudo-GT.
+    Pushes confidence high near epipolar lines, low far away.
+
+    Args:
+        conf_matrix: [B, L, S] dual-softmax confidence matrix
+        epi_mask:    [B, L, S] Gaussian epipolar mask (values in [0, 1])
+    """
+    # Threshold mask to get binary target
+    target = (epi_mask > 0.5).float()
+
+    p = conf_matrix.clamp(1e-7, 1 - 1e-7)
+    pos_loss = -alpha * (1 - p) ** gamma * torch.log(p) * target
+    neg_loss = -(1 - alpha) * p ** gamma * torch.log(1 - p) * (1 - target)
+
+    # Normalize by number of positives (like standard focal loss)
+    n_pos = target.sum().clamp(min=1.0)
+    loss = (pos_loss + neg_loss).sum() / n_pos
+    return loss
+
+
+def sampson_epipolar_loss(mkpts0, mkpts1, F_mat, b_ids):
+    """
+    SCENES-style Sampson epipolar distance loss.
+
+    Args:
+        mkpts0: [M, 2] predicted match coords in image 0 (pixels)
+        mkpts1: [M, 2] predicted match coords in image 1 (pixels)
+        F_mat:  list of 3x3 numpy arrays (one per batch element), or None entries
+        b_ids:  [M] batch index for each match
+
+    Returns:
+        Scalar mean Sampson distance over all valid matches.
+    """
+    if mkpts0 is None or len(mkpts0) == 0:
+        device = mkpts0.device if mkpts0 is not None else 'cpu'
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    device = mkpts0.device
+    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    count = 0
+
+    for i, F_np in enumerate(F_mat):
+        if F_np is None:
+            continue
+        mask = (b_ids == i)
+        if mask.sum() == 0:
+            continue
+
+        p0 = mkpts0[mask]  # [n, 2]
+        p1 = mkpts1[mask]  # [n, 2]
+
+        # Homogeneous coords
+        ones = torch.ones(p0.shape[0], 1, device=device)
+        p0h = torch.cat([p0, ones], dim=1)  # [n, 3]
+        p1h = torch.cat([p1, ones], dim=1)  # [n, 3]
+
+        F_t = torch.tensor(F_np, dtype=torch.float32, device=device)
+
+        # Sampson distance: (p1^T F p0)^2 / (||Fp0||_{1:2}^2 + ||F^T p1||_{1:2}^2)
+        Fp0 = (F_t @ p0h.T).T     # [n, 3]
+        Ftp1 = (F_t.T @ p1h.T).T  # [n, 3]
+        num = (p1h * Fp0).sum(dim=1) ** 2  # (p1^T F p0)^2
+        denom = Fp0[:, :2].pow(2).sum(dim=1) + Ftp1[:, :2].pow(2).sum(dim=1)
+        sampson = num / (denom + 1e-8)
+
+        total_loss = total_loss + sampson.sum()
+        count += sampson.shape[0]
+
+    if count == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    return total_loss / count
+
+
 class MatchFormerLoss(nn.Module):
     def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0):
         super().__init__()

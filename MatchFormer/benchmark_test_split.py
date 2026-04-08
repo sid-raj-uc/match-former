@@ -183,7 +183,7 @@ def main():
 
     # ── Print results ────────────────────────────────────────────────────────
     print(f'\n{"="*80}')
-    print(f'POSE ESTIMATION BENCHMARK — scene0000 test split ({len(val_ds)} pairs)')
+    print(f'POSE ESTIMATION BENCHMARK — {args.data_dir} test split ({len(val_ds)} pairs)')
     print(f'{"="*80}')
     print(f'{"Method":<25} | {"AUC@5°":>7} {"AUC@10°":>8} {"AUC@20°":>8} | {"P(%)":>6} | {"Matches":>8}')
     print(f'{"-"*25}-+-{"-"*26}-+-{"-"*6}-+-{"-"*8}')

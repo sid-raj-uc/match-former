@@ -1,0 +1,261 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{caption}
+
+\title{Epipolar Curriculum Fine-Tuning for Robust Feature Matching on Out-of-Distribution Datasets}
+\author{Siddharth Raj}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Background and Prior Work}
+
+Feature matching is a foundational task in computer vision, enabling downstream applications such as visual odometry, SLAM, structure-from-motion, and 3D reconstruction. Transformer-based matchers like MatchFormer~\cite{wang2022matchformer} and LoFTR~\cite{sun2021loftr} have achieved strong performance on standard indoor (ScanNet) and outdoor (MegaDepth) benchmarks by interleaving self- and cross-attention within a coarse-to-fine matching pipeline.
+
+However, these models are trained on curated datasets with well-calibrated cameras, moderate baselines, and static scenes. When deployed on out-of-distribution (OOD) data---such as the aggressive drone trajectories in EuRoC-MAV~\cite{burri2016euroc} or the extreme viewpoint and illumination changes in WxBS~\cite{mishkin2015wxbs}---performance degrades significantly. The pretrained models produce fewer matches, higher reprojection errors, and worse pose estimation accuracy.
+
+\subsection{What We Have Done So Far}
+
+In Phase~1 of this project, we investigated enhancing MatchFormer's geometric reasoning through epipolar constraints:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Epipolar masking at inference.} We applied a soft Gaussian mask to the coarse confidence matrix after dual-softmax normalization, weighting matches by their distance to the epipolar line. This improved pose estimation AUC@20\textdegree\ from 0.00 to 8.48 on 323 hard ScanNet pairs where the vanilla model fails---a 39\% recovery rate on previously unsolvable cases.
+
+    \item \textbf{Benchmarking on WxBS.} We evaluated epipolar masking across 8 challenging outdoor scenes from the WxBS dataset, comparing Laplacian, Gaussian, and hard decay functions. Gaussian masking with $\sigma=10$ emerged as the best default, reducing mean reprojection error by up to $14\times$ on hard scenes (e.g., Strahov: $114 \to 8$\,px).
+
+    \item \textbf{Fine-tuning infrastructure.} We built a complete fine-tuning pipeline for MatchFormer including frozen backbone training (Block1/2 frozen, Block3/4 + FPN head trainable, all BatchNorm frozen), per-pair epipolar mask computation with Gaussian decay, multi-scene ScanNet training with deterministic per-scene train/test splits, focal loss with configurable hard negative sampling, and comprehensive benchmarking scripts for pose AUC and matching precision.
+
+    \item \textbf{Key findings:}
+    \begin{itemize}
+        \item Epipolar masking at inference requires known camera intrinsics and extrinsics, limiting its applicability.
+        \item Fine-tuning with standard correspondence losses (focal loss on GT depth-projected matches) struggles to improve over the pretrained baseline.
+        \item BatchNorm corruption from small-batch fine-tuning is a critical failure mode that must be addressed by freezing BN running statistics.
+        \item Loss collapse occurs when training on easy pairs (small frame gap); harder pairs and hard negative sampling are essential.
+    \end{itemize}
+\end{enumerate}
+
+\noindent\textbf{The fundamental limitation:} Epipolar masking works well but requires calibration at test time. A model that has \emph{internalized} geometric reasoning---producing epipolar-consistent matches without any mask---would be far more useful in practice.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Proposed Work}
+
+\subsection{Core Idea}
+
+We propose to fine-tune MatchFormer (and optionally LoFTR) to produce geometrically robust matches on challenging OOD datasets, using \textbf{only camera intrinsics and extrinsics as supervision}---no ground-truth correspondences required.
+
+This draws direct motivation from \textbf{SCENES}~\cite{kloepfer2024scenes}, which demonstrated that epipolar geometry alone provides sufficient supervision for adapting feature matchers to new domains. Their key insight: rather than requiring expensive 3D structure (depth maps, point clouds, or manually annotated correspondences), the epipolar constraint---that corresponding points must lie on each other's epipolar lines---provides a free geometric training signal derivable from camera poses alone.
+
+\subsection{Methodology}
+
+\subsubsection{Epipolar Curriculum Training (Three Phases)}
+
+We adopt a phased curriculum that progressively transfers geometric reasoning from an external scaffold (the epipolar mask) into the network's learned weights.
+
+\paragraph{Phase 1: Scaffolded Training ($\sim$10k steps).}
+A full-strength Gaussian epipolar mask is applied after dual-softmax on the coarse confidence matrix:
+\begin{equation}
+    M(i,j) = \exp\!\left(-\frac{d(p_j, l_i)^2}{2\sigma_0^2}\right), \qquad P_{\text{masked}} = P \odot M
+\end{equation}
+where $d(p_j, l_i)$ is the perpendicular distance from coarse grid point $p_j$ in image~1 to the epipolar line $l_i = F\tilde{p}_i$ of query point $p_i$ in image~0, and $\sigma_0 = 3$ coarse pixels ($\approx 24$\,px at full resolution). The loss is the standard focal loss on the masked confidence matrix plus L2 fine-level regression loss. No epipolar loss term is introduced; the mask is the sole geometric signal.
+
+\paragraph{Phase 2: Annealing + Loss Handoff ($\sim$15k steps).}
+Two simultaneous processes occur:
+
+\begin{enumerate}
+    \item \textit{Mask annealing}: The bandwidth $\sigma$ grows exponentially, making the Gaussian progressively wider and the constraint weaker:
+    \begin{equation}
+        \sigma(t) = \sigma_0 \cdot \exp\!\left(\alpha \cdot \frac{t - t_{\text{start}}}{T_{\text{phase2}}}\right)
+    \end{equation}
+    where $\alpha$ is the annealing rate, calibrated by the Geometric Internalization Ratio (GIR) from the Phase~1 exit diagnostic.
+
+    \item \textit{Epipolar loss ramp-up}: A SCENES-style Sampson distance loss is introduced on the predicted fine matches:
+    \begin{equation}
+        \mathcal{L}_{\text{epi}} = \frac{1}{N}\sum_{k=1}^{N} \frac{(\tilde{p}_{1,k}^\top F \tilde{p}_{0,k})^2}{\|F\tilde{p}_{0,k}\|_{1:2}^2 + \|F^\top\tilde{p}_{1,k}\|_{1:2}^2}
+    \end{equation}
+    This requires only the fundamental matrix $F$ (derived from poses and intrinsics)---no ground-truth correspondences. Its weight ramps linearly from 0 to $\lambda_{\max}$ over the first half of Phase~2.
+\end{enumerate}
+
+The total loss becomes:
+\begin{equation}
+    \mathcal{L}_{\text{total}} = \lambda_c \mathcal{L}_{\text{coarse}} + \lambda_f \mathcal{L}_{\text{fine}} + \lambda_{\text{epi}}(t) \cdot \mathcal{L}_{\text{epi}}
+\end{equation}
+
+\paragraph{Phase 3: Free Flight ($\sim$10k steps).}
+The mask is completely removed ($M = \mathbf{1}$). The network's coarse matching runs exactly as it will at inference---pure dual-softmax on unmasked similarity scores. A residual epipolar loss (10\% of peak weight) acts as a gentle geometric regularizer. Mixed frame gaps (20--50) force the model to handle varying difficulty without assistance.
+
+\subsubsection{Domain Adaptation via Epipolar-Only Supervision}
+
+For adapting to OOD datasets, we follow SCENES' approach:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{No GT correspondences needed.} We use only the camera trajectory (poses) and intrinsics from the target domain. For EuRoC-MAV, these come from the Vicon motion capture ground truth. For WxBS, we derive pseudo-GT poses from known correspondences via essential matrix decomposition.
+
+    \item \textbf{Bootstrapping with uncertain poses.} Following SCENES, when only approximate poses are available (e.g., from visual odometry), we use a bootstrapping loop: fine-tune with current pose estimates, use the improved matcher to re-estimate poses, and repeat until convergence.
+
+    \item \textbf{Domain-specific challenges:}
+    \begin{itemize}
+        \item \textit{EuRoC-MAV}: Fast drone motion causes motion blur, large viewpoint changes between frames, and aggressive rotations. We address this with wider frame gaps and blur-aware data augmentation.
+        \item \textit{WxBS}: Extreme illumination changes (day/night), large scale differences, and repeated textures. We focus on learning illumination-invariant features through the cross-attention adaptation.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Training Configuration}
+
+\begin{table}[h]
+\centering
+\caption{Per-phase training hyperparameters.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Parameter} & \textbf{Phase 1} & \textbf{Phase 2} & \textbf{Phase 3} \\
+\midrule
+Mask strength & Full ($\sigma_0$) & Annealing & Off \\
+Epipolar loss weight & 0 & $0 \to \lambda_{\max}$ & $\lambda_{\max} \to 0.1\lambda_{\max}$ \\
+Learning rate & $3\!\times\!10^{-5}$ & $2\!\times\!10^{-5}$ & $1\!\times\!10^{-5}$ \\
+LR schedule & Cosine & Cosine & Cosine \\
+Frame gap & 40 & $20 \to 40$ & $20$--$50$ (mixed) \\
+Frozen layers & Block1/2, all BN & Block1/2, all BN & Block1/2, all BN \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Differences from SCENES}
+
+While inspired by SCENES, our approach differs in several key ways:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Architecture.} We adapt MatchFormer's interleaved attention architecture (not SuperGlue/LoFTR), which integrates feature extraction and matching in a single backbone.
+    \item \textbf{Curriculum.} SCENES applies epipolar loss from step~0. We use a three-phase curriculum that first scaffolds with a geometric mask, then transitions to the loss. This is gentler and should preserve more pretrained knowledge.
+    \item \textbf{Selective freezing.} We freeze the low-level vision layers (Block1/2) and all BatchNorm statistics, training only the high-level cross-attention and FPN matching layers.
+    \item \textbf{Hard negative sampling.} We sample on-epipolar hard negatives---points along the correct epipolar line but at wrong depths---which SCENES does not explicitly address.
+\end{enumerate}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Evaluation Plan}
+
+\subsection{Datasets}
+
+\begin{table}[h]
+\centering
+\caption{Evaluation datasets and their characteristics.}
+\begin{tabular}{llll}
+\toprule
+\textbf{Dataset} & \textbf{Domain} & \textbf{Challenges} & \textbf{Pose Source} \\
+\midrule
+ScanNet (train) & Indoor rooms & Baseline domain & GT poses \\
+EuRoC-MAV & Indoor drone & Motion blur, fast rotation & Vicon GT \\
+WxBS & Outdoor landmarks & Illumination, scale, viewpoint & Pseudo-GT \\
+ScanNet (held-out) & Indoor rooms & In-distribution test & GT poses \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Metrics}
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Pose Estimation AUC}: AUC at angular error thresholds @5\textdegree, @10\textdegree, @20\textdegree---the primary metric for geometric quality.
+    \item \textbf{Matching Precision}: Percentage of predicted matches within 3\,px and 5\,px of ground truth.
+    \item \textbf{Match Count}: Number of confident matches per pair (confidence $>$ threshold).
+    \item \textbf{Geometric Internalization Ratio (GIR)}: Ratio of mask-off to mask-on AUC@5\textdegree---measures how much geometric reasoning the network has internalized:
+    \begin{equation}
+        \text{GIR} = \frac{\text{AUC}_{\text{mask-off}}(@5°)}{\text{AUC}_{\text{mask-on}}(@5°)}
+    \end{equation}
+\end{enumerate}
+
+\subsection{Baselines and Ablations}
+
+\begin{table}[h]
+\centering
+\caption{Experimental conditions.}
+\begin{tabular}{ll}
+\toprule
+\textbf{Condition} & \textbf{Description} \\
+\midrule
+Vanilla MatchFormer & Pretrained model, no fine-tuning \\
+Vanilla + Epipolar Mask & Inference-time masking (requires calibration) \\
+Correspondence-supervised & Fine-tuned with GT depth-projected matches \\
+\textbf{Epipolar-only (ours)} & \textbf{Fine-tuned with epipolar curriculum (no GT correspondences)} \\
+\midrule
+\multicolumn{2}{l}{\textit{Ablations}} \\
+\midrule
+Mask-only (no annealing) & Isolate mask contribution vs.\ curriculum \\
+Loss-only (no mask) & Compare SCENES-style direct loss vs.\ our curriculum \\
+Mask + Loss (no annealing) & Full signal throughout---does curriculum matter? \\
+Full curriculum & Complete three-phase approach \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Expected Contributions}
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Correspondence-free fine-tuning}: Demonstrate that MatchFormer can be effectively adapted to new domains using only camera poses---no depth maps, point clouds, or manually annotated correspondences.
+
+    \item \textbf{Epipolar curriculum}: A principled three-phase training strategy that transfers geometric knowledge from an external mask into the network's weights, combining the speed of mask-based training with the generality of self-supervised geometric learning.
+
+    \item \textbf{OOD robustness}: Quantified improvements on EuRoC-MAV and WxBS over the pretrained baseline, showing that domain-specific geometric adaptation is possible without domain-specific ground truth.
+
+    \item \textbf{Practical impact}: A fine-tuned model that deploys without requiring camera calibration at inference---unlike the epipolar masking approach which needs known poses and intrinsics.
+\end{enumerate}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Timeline}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cl}
+\toprule
+\textbf{Week} & \textbf{Milestone} \\
+\midrule
+1 & Complete Phase~1 training on ScanNet (6 scenes), validate GIR diagnostic \\
+2 & Implement Sampson epipolar loss, run Phase~2 annealing on ScanNet \\
+3 & Phase~3 free flight + full ScanNet benchmark (in-distribution) \\
+4 & Adapt pipeline to EuRoC-MAV, run epipolar-only fine-tuning \\
+5 & Adapt pipeline to WxBS, run epipolar-only fine-tuning \\
+6 & Ablation study (4 conditions), final benchmarks, paper writeup \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plainnat}
+\begin{thebibliography}{5}
+
+\bibitem[Kloepfer et~al.(2024)]{kloepfer2024scenes}
+Dominik~A. Kloepfer, Jo\~{a}o~F. Henriques, and Dylan Campbell.
+\newblock {SCENES}: Subpixel correspondence estimation with epipolar supervision.
+\newblock \emph{arXiv preprint arXiv:2401.10886}, 2024.
+
+\bibitem[Wang et~al.(2022)]{wang2022matchformer}
+Qing Wang, Jiaming Zhang, Kailun Yang, Kunyu Peng, Rainer Stiefelhagen, et~al.
+\newblock {MatchFormer}: Interleaving attention in transformers for feature matching.
+\newblock In \emph{ACCV}, 2022.
+
+\bibitem[Sun et~al.(2021)]{sun2021loftr}
+Jiaming Sun, Zehong Shen, Yuang Wang, Hujun Bao, and Xiaowei Zhou.
+\newblock {LoFTR}: Detector-free local feature matching with transformers.
+\newblock In \emph{CVPR}, 2021.
+
+\bibitem[Burri et~al.(2016)]{burri2016euroc}
+Michael Burri, Janosch Nikolic, Pascal Gohl, Thomas Schneider, Joern Rehder, Sammy Omari, Markus~W. Achtelik, and Roland Siegwart.
+\newblock The {EuRoC} micro aerial vehicle datasets.
+\newblock \emph{IJRR}, 35(10):1157--1163, 2016.
+
+\bibitem[Mishkin et~al.(2015)]{mishkin2015wxbs}
+Dmytro Mishkin, Jiri Matas, and Michal Perdoch.
+\newblock {WxBS}: Wide baseline stereo generalizations.
+\newblock In \emph{BMVC}, 2015.
+
+\end{thebibliography}
+
+\end{document}

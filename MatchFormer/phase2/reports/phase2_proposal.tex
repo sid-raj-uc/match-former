@@ -1,0 +1,152 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{natbib}
+
+\title{Phase~2 Proposal: Epipolar Annealing and Sampson Loss Handoff for MatchFormer}
+\author{Siddharth Raj}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Phase~1 Summary}
+
+In Phase~1 we fine-tuned MatchFormer on six ScanNet scenes (0000--0005) with a full-strength Gaussian epipolar mask applied after dual-softmax on the coarse confidence matrix.
+The mask weights each candidate match by $M(i,j)=\exp\!\bigl(-d(p_j,l_i)^2/2\sigma_0^2\bigr)$ with $\sigma_0=3$ coarse pixels ($\approx24$\,px at full resolution), constraining the network to match within the epipolar band.
+Training used a frozen backbone (Block1/2 and all BatchNorm fixed), cosine-annealed learning rate from $3\!\times\!10^{-5}$ to $5\!\times\!10^{-6}$, frame gap of 40, and hard-negative sampling with 15 negatives per positive.
+The model converged to a stable training loss of $\sim$0.85 and validation loss of $\sim$0.85--0.91 over 20k steps.
+At the end of Phase~1 we compute the \emph{Geometric Internalization Ratio} (GIR), defined as $\text{GIR}=\text{AUC}_{\text{mask-off}}(@5°)\,/\,\text{AUC}_{\text{mask-on}}(@5°)$, which measures how much geometric reasoning the network has absorbed into its weights versus relying on the external mask.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Phase~2 Objective}
+
+Phase~2 performs a controlled handoff: the epipolar mask is progressively removed while a Sampson epipolar loss ramps up, ensuring the network retains geometric reasoning without external scaffolding.
+By the end of Phase~2 the model should achieve GIR~$>0.85$, meaning it performs nearly as well without the mask as with it.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Methodology}
+
+\subsection{Mask Annealing}
+
+The mask bandwidth $\sigma$ grows exponentially over Phase~2, progressively widening the Gaussian until it becomes flat ($M\to\mathbf{1}$):
+\begin{equation}
+    \sigma(t) = \sigma_0 \cdot \exp\!\left(\alpha \cdot \frac{t - t_{\text{start}}}{T_{\text{phase2}}}\right)
+\end{equation}
+where $\alpha$ is the annealing rate, calibrated by the GIR from the Phase~1 exit diagnostic (Table~\ref{tab:gir}).
+
+\begin{table}[h]
+\centering
+\caption{Annealing rate selection based on Phase~1 GIR.}
+\label{tab:gir}
+\begin{tabular}{lll}
+\toprule
+\textbf{GIR Range} & \textbf{Interpretation} & \textbf{Annealing rate $\alpha$} \\
+\midrule
+$>0.8$ & Strong internalization & 3--4 (aggressive) \\
+$0.5$--$0.8$ & Partial internalization & 2--3 (moderate) \\
+$<0.5$ & Weak internalization & 1--2 (slow) \\
+$<0.3$ & Mask-dependent & Extend Phase~1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sampson Epipolar Loss}
+
+Simultaneously, a correspondence-free epipolar loss is introduced on the predicted fine matches.  For each match $(p_i, p_j)$ we compute the symmetric Sampson distance using only the fundamental matrix~$F$:
+\begin{equation}
+    \mathcal{L}_{\text{epi}} = \frac{1}{N}\sum_{k=1}^{N} \frac{(\tilde{p}_{1,k}^\top F\,\tilde{p}_{0,k})^2}
+    {\|F\tilde{p}_{0,k}\|_{1:2}^2 + \|F^\top\tilde{p}_{1,k}\|_{1:2}^2}
+\end{equation}
+This loss requires \emph{no ground-truth correspondences}---only camera poses and intrinsics, which are available in all our target datasets.
+
+The loss weight ramps linearly over the first half of Phase~2:
+\begin{equation}
+    \lambda_{\text{epi}}(t) = \lambda_{\max} \cdot \min\!\left(1,\;\frac{t - t_{\text{start}}}{T_{\text{phase2}}/2}\right)
+\end{equation}
+
+\subsection{Combined Training Loss}
+
+\begin{equation}
+    \mathcal{L}_{\text{total}} = \lambda_c\,\mathcal{L}_{\text{coarse}} + \lambda_f\,\mathcal{L}_{\text{fine}} + \lambda_{\text{epi}}(t)\cdot\mathcal{L}_{\text{epi}}
+\end{equation}
+
+\subsection{Frame Gap Escalation}
+
+As the mask weakens, we increase pair difficulty to force geometric internalization:
+\begin{equation}
+    \text{frame\_gap}(t) = 20 + 20\cdot\frac{t - t_{\text{start}}}{T_{\text{phase2}}}
+\end{equation}
+This linearly grows the gap from 20 to 40, ensuring the network cannot rely on easy photometric matching.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Training Configuration}
+
+\begin{table}[h]
+\centering
+\caption{Phase~2 hyperparameters.}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Steps & $\sim$12k--15k (adaptive) \\
+Learning rate & $2\!\times\!10^{-5}$ (cosine $\to 3\!\times\!10^{-6}$) \\
+Mask & Annealing ($\sigma_0 \to \infty$) \\
+Epipolar loss weight & $0 \to \lambda_{\max}$ (linear ramp) \\
+Frame gap & $20 \to 40$ (linear ramp) \\
+Frozen layers & Block1/2, all BatchNorm \\
+Neg per positive & 15 \\
+Batch size & 2--4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Monitoring and Exit Criteria}
+
+\paragraph{GIR tracking.}  Every 2k steps, evaluate mask-on vs.\ mask-off AUC@5\textdegree\ on the validation split.  GIR should increase monotonically toward 1.0.
+
+\paragraph{Failure recovery.}
+\begin{itemize}[leftmargin=*]
+    \item \textit{GIR plateaus}: Reduce $\alpha$ by 0.5 and continue.
+    \item \textit{GIR drops}: Pause annealing (hold $\sigma$ constant), increase $\lambda_{\text{epi}}$, let the loss stabilize before resuming.
+    \item \textit{Training loss spikes}: The distribution shift from mask removal is too fast; slow the annealing.
+\end{itemize}
+
+\paragraph{Exit criteria.} Phase~2 is complete when: (1) the mask has fully annealed ($M\approx\mathbf{1}$), (2) $\text{GIR}>0.85$, and (3) training loss has restabilized.
+
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Implementation Checklist}
+
+\begin{enumerate}[leftmargin=*]
+    \item Implement Sampson distance loss in \texttt{losses.py}
+    \item Add $\sigma$ annealing schedule to the training loop
+    \item Add $\lambda_{\text{epi}}$ linear ramp-up schedule
+    \item Add frame gap ramping logic to the data loader
+    \item Build GIR evaluation script (mask-on vs.\ mask-off benchmark)
+    \item Set up per-phase cosine LR schedule (fresh optimizer for Phase~2)
+\end{enumerate}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plainnat}
+\begin{thebibliography}{2}
+
+\bibitem[Kloepfer et~al.(2024)]{kloepfer2024scenes}
+Dominik~A. Kloepfer, Jo\~{a}o~F. Henriques, and Dylan Campbell.
+\newblock {SCENES}: Subpixel correspondence estimation with epipolar supervision.
+\newblock \emph{arXiv preprint arXiv:2401.10886}, 2024.
+
+\bibitem[Wang et~al.(2022)]{wang2022matchformer}
+Qing Wang, Jiaming Zhang, Kailun Yang, Kunyu Peng, Rainer Stiefelhagen, et~al.
+\newblock {MatchFormer}: Interleaving attention in transformers for feature matching.
+\newblock In \emph{ACCV}, 2022.
+
+\end{thebibliography}
+
+\end{document}

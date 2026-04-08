@@ -35,6 +35,7 @@ from config.defaultmf import get_cfg_defaults
 from model.lightning_loftr import PL_LoFTR
 from model.datasets.scannet_simple import ScanNetSimpleDataset
 from model.backbone.coarse_matching import CoarseMatching
+from model.losses import sampson_epipolar_loss, epipolar_coarse_loss
 from gt_epipolar import compute_fundamental_matrix
 
 # ── Epipolar Constraint Setup ─────────────────────────────────────────────────
@@ -78,22 +79,6 @@ def epipolar_coarse_forward(self, feat_c0, feat_c1, data, mask_c0=None, mask_c1=
     if mask_c0 is not None:
         sim_matrix.masked_fill_(~(mask_c0[..., None] * mask_c1[:, None]).bool(), -1e9)
     conf_matrix = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
-
-    # Apply per-pair epipolar masks (one F matrix per batch element)
-    epipolar_F_list = getattr(self, 'epipolar_F_list', None)
-    if epipolar_F_list is not None:
-        tau = getattr(self, 'epipolar_tau', 10.0)
-        H0, W0 = data['hw0_c']
-        H1, W1 = data['hw1_c']
-        masks = []
-        for i in range(N):
-            if i < len(epipolar_F_list) and epipolar_F_list[i] is not None:
-                m = get_epipolar_mask_matrix(epipolar_F_list[i], H0, W0, H1, W1, tau=tau, device=conf_matrix.device)
-                masks.append(m.squeeze(0))  # [L, S]
-            else:
-                masks.append(torch.ones(L, S, device=conf_matrix.device))
-        epi_mask = torch.stack(masks, dim=0)  # [N, L, S]
-        conf_matrix = conf_matrix * epi_mask
 
     data.update({'conf_matrix': conf_matrix, 'sim_matrix': sim_matrix})
     data.update(**self.get_coarse_match(conf_matrix, data))
@@ -143,9 +128,11 @@ class EpipolarFineTuner(PL_LoFTR):
     Before each forward pass in training, we compute F from the batch poses
     and inject it into CoarseMatching.
     """
-    def __init__(self, config, pretrained_ckpt=None, tau=10.0, freeze_backbone=True):
+    def __init__(self, config, pretrained_ckpt=None, tau=10.0, freeze_backbone=True, lambda_epi=0.0):
         super().__init__(config, pretrained_ckpt=pretrained_ckpt, freeze_backbone=freeze_backbone)
         self.tau = tau
+        self.lambda_epi = lambda_epi
+        self._current_F_list = None  # stored per batch for loss computation
 
     def _inject_epipolar(self, batch):
         """Compute F for each pair in the batch and inject into coarse_matching."""
@@ -166,16 +153,83 @@ class EpipolarFineTuner(PL_LoFTR):
                 F_list.append(F_mat)
             except Exception:
                 F_list.append(None)
-        self.matcher.coarse_matching.epipolar_F_list = F_list
-        self.matcher.coarse_matching.epipolar_tau = self.tau
+        self._current_F_list = F_list
+
+    def _compute_epi_mask(self, batch):
+        """Compute epipolar mask [B, L, S] from stored F matrices."""
+        F_list = self._current_F_list
+        if F_list is None:
+            return None
+        H0, W0 = batch['hw0_c']
+        H1, W1 = batch['hw1_c']
+        B = batch['image0'].shape[0]
+        device = batch['image0'].device
+        masks = []
+        for i in range(B):
+            if i < len(F_list) and F_list[i] is not None:
+                m = get_epipolar_mask_matrix(F_list[i], H0, W0, H1, W1, tau=self.tau, device=device)
+                masks.append(m.squeeze(0))
+            else:
+                masks.append(torch.ones(H0 * W0, H1 * W1, device=device))
+        return torch.stack(masks, dim=0)
 
     def training_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
-        return super().training_step(batch, batch_idx)
+
+        # Standard forward (populates conf_matrix, mkpts0_f, etc.)
+        loss_standard = super().training_step(batch, batch_idx)
+
+        if self.lambda_epi <= 0 or self._current_F_list is None:
+            return loss_standard
+
+        loss_total = loss_standard  # 0 on MH_05 (no depth), nonzero on ScanNet
+
+        # --- SCENES coarse term: focal loss with epipolar mask as pseudo-GT ---
+        conf_matrix = batch.get('conf_matrix')
+        epi_mask = self._compute_epi_mask(batch)
+        if conf_matrix is not None and epi_mask is not None:
+            loss_coarse_epi = epipolar_coarse_loss(conf_matrix, epi_mask)
+            loss_total = loss_total + (1 - self.lambda_epi) * loss_coarse_epi
+            self.log('train/loss_coarse_epi', loss_coarse_epi.detach(), on_step=True, on_epoch=True)
+
+        # --- SCENES fine term: Sampson distance on predicted matches ---
+        mkpts0 = batch.get('mkpts0_f')
+        mkpts1 = batch.get('mkpts1_f')
+        m_bids = batch.get('m_bids')
+        if mkpts0 is not None and len(mkpts0) > 0:
+            loss_sampson = sampson_epipolar_loss(mkpts0, mkpts1, self._current_F_list, m_bids)
+            loss_total = loss_total + self.lambda_epi * loss_sampson
+            self.log('train/loss_sampson', loss_sampson.detach(), on_step=True, on_epoch=True)
+
+        self.log('train/loss_scenes', loss_total.detach(), on_step=True, on_epoch=True)
+        return loss_total
 
     def validation_step(self, batch, batch_idx):
         self._inject_epipolar(batch)
-        return super().validation_step(batch, batch_idx)
+        loss_standard = super().validation_step(batch, batch_idx)
+
+        if self.lambda_epi <= 0 or self._current_F_list is None:
+            return loss_standard
+
+        loss_total = loss_standard
+
+        conf_matrix = batch.get('conf_matrix')
+        epi_mask = self._compute_epi_mask(batch)
+        if conf_matrix is not None and epi_mask is not None:
+            loss_coarse_epi = epipolar_coarse_loss(conf_matrix, epi_mask)
+            loss_total = loss_total + (1 - self.lambda_epi) * loss_coarse_epi
+            self.log('val/loss_coarse_epi', loss_coarse_epi.detach(), on_step=False, on_epoch=True)
+
+        mkpts0 = batch.get('mkpts0_f')
+        mkpts1 = batch.get('mkpts1_f')
+        m_bids = batch.get('m_bids')
+        if mkpts0 is not None and len(mkpts0) > 0:
+            loss_sampson = sampson_epipolar_loss(mkpts0, mkpts1, self._current_F_list, m_bids)
+            loss_total = loss_total + self.lambda_epi * loss_sampson
+            self.log('val/loss_sampson', loss_sampson.detach(), on_step=False, on_epoch=True)
+
+        self.log('val/loss_scenes', loss_total.detach(), on_step=False, on_epoch=True)
+        return loss_total
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -229,6 +283,9 @@ def main():
                              'First 90%% = train, last 10%% = test.')
     parser.add_argument('--eta_min',      type=float, default=1e-6,
                         help='Minimum LR for CosineAnnealingLR scheduler.')
+    parser.add_argument('--lambda_epi',  type=float, default=0.0,
+                        help='Weight for Sampson epipolar loss on predicted matches. '
+                             '0 = disabled. Try 0.1-0.5 for Phase 2.')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -300,7 +357,8 @@ def main():
 
     # ── Model ────────────────────────────────────────────────────────────────
     model = EpipolarFineTuner(config, pretrained_ckpt=args.ckpt, tau=args.tau,
-                               freeze_backbone=not args.no_freeze)
+                               freeze_backbone=not args.no_freeze,
+                               lambda_epi=args.lambda_epi)
 
     # ── Callbacks & Trainer ──────────────────────────────────────────────────
     callbacks = [
@@ -340,6 +398,7 @@ def main():
                 'neg_per_pos': args.neg_per_pos,
 'frame_gap': args.frame_gap,
                 'random_gap': args.random_gap,
+                'lambda_epi': args.lambda_epi,
                 'precision': precision,
                 'resume': resume_path,
             },
