@@ -95,10 +95,12 @@ def main():
     parser = argparse.ArgumentParser(description='Benchmark on 10% test split')
     parser.add_argument('--data_dir', default='../data/scans/scene0000_00/exported')
     parser.add_argument('--vanilla_ckpt', default='model/weights/indoor-lite-LA.ckpt')
-    parser.add_argument('--finetuned_ckpt', default='phase2/weights/r4.ckpt')
+    parser.add_argument('--finetuned_ckpt', default='phase2/weights/good-1.ckpt')
     parser.add_argument('--split_seed', type=int, default=42)
     parser.add_argument('--frame_gap', type=int, default=20)
     parser.add_argument('--tau', type=float, default=10.0)
+    parser.add_argument('--split_mode', default='sequential', choices=['sequential', 'random'])
+    parser.add_argument('--split_seed', type=int, default=42)
     args = parser.parse_args()
 
     # Device
@@ -111,7 +113,8 @@ def main():
     print(f'Device: {device}')
 
     # ── Reproduce train/val split ────────────────────────────────────────────
-    val_ds = ScanNetSimpleDataset(args.data_dir, frame_gap=args.frame_gap, split='test', split_ratio=0.9)
+    val_ds = ScanNetSimpleDataset(args.data_dir, frame_gap=args.frame_gap, split='test', split_ratio=0.9,
+                                     split_mode=args.split_mode, split_seed=args.split_seed)
     n_val = len(val_ds)
     print(f'\nBenchmarking on {n_val} val pairs (last 10% chronological split)\n')
 
