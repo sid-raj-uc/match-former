@@ -97,24 +97,28 @@ def fine_loss(data):
     return loss
 
 
-def epipolar_coarse_loss(conf_matrix, epi_mask, alpha=0.25, gamma=2.0):
+def epi_focal_loss(conf_matrix, epi_mask, alpha=0.25, gamma=2.0):
     """
-    SCENES-style coarse loss: focal loss using epipolar mask as pseudo-GT.
-    Pushes confidence high near epipolar lines, low far away.
+    Search-reward focal loss using epipolar binary mask as pseudo-GT.
+    No GT point correspondences needed — only camera geometry.
+
+    Pushes confidence high near epipolar lines (mask=1),
+    low far away (mask=0).
 
     Args:
         conf_matrix: [B, L, S] dual-softmax confidence matrix
-        epi_mask:    [B, L, S] Gaussian epipolar mask (values in [0, 1])
+        epi_mask:    [B, L, S] binary epipolar mask (1 = near epipolar line)
     """
-    # Threshold mask to get binary target
-    target = (epi_mask > 0.5).float()
+    conf = conf_matrix.reshape(-1)
+    mask = epi_mask.reshape(-1)
 
-    p = conf_matrix.clamp(1e-7, 1 - 1e-7)
-    pos_loss = -alpha * (1 - p) ** gamma * torch.log(p) * target
-    neg_loss = -(1 - alpha) * p ** gamma * torch.log(1 - p) * (1 - target)
+    p = conf.clamp(1e-7, 1 - 1e-7)
+    # Focal loss: -alpha * (1-p)^gamma * log(p) * target
+    #           - (1-alpha) * p^gamma * log(1-p) * (1-target)
+    pos_loss = -alpha * (1 - p) ** gamma * torch.log(p) * mask
+    neg_loss = -(1 - alpha) * p ** gamma * torch.log(1 - p) * (1 - mask)
 
-    # Normalize by number of positives (like standard focal loss)
-    n_pos = target.sum().clamp(min=1.0)
+    n_pos = mask.sum().clamp(min=1.0)
     loss = (pos_loss + neg_loss).sum() / n_pos
     return loss
 
@@ -173,66 +177,55 @@ def sampson_epipolar_loss(mkpts0, mkpts1, F_mat, b_ids):
     return total_loss / count
 
 
-def soft_sampson_loss(conf_matrix, F_list, H0, W0, H1, W1, H_img=480, W_img=640):
+def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1):
     """
-    Sampson epipolar loss on soft (confidence-weighted) match positions.
-    Fully differentiable through conf_matrix — no argmax.
+    Precision-steering Sampson loss — fully differentiable through conf_matrix.
 
-    For each query point i in image 0, computes:
-        p1_soft[i] = sum_j(conf[i,j] * pos1[j]) / sum_j(conf[i,j])
-        loss += sampson(p0[i], p1_soft[i], F)
+    Step A: Soft match via confidence-weighted center of mass:
+        p1_soft[b,i] = sum_j(conf[b,i,j] * grid_coords1[j]) / sum_j(conf[b,i,j])
+    Step B: Sampson distance d_S(p0[i], p1_soft[i], F)
+    Step C: Confidence-weighted normalization:
+        loss = sum(C_max * d_S) / (sum(C_max) + eps)
 
     Args:
-        conf_matrix: [B, L, S] dual-softmax confidence matrix
-        F_list: list of 3x3 numpy F matrices (one per batch element)
-        H0, W0: coarse grid dimensions for image 0
-        H1, W1: coarse grid dimensions for image 1
+        conf_matrix:   [B, L, S] dual-softmax confidence matrix
+        F_list:        list of [3, 3] numpy F matrices (one per batch element)
+        grid_coords0:  [L, 2] pixel coords of each cell center in image 0
+        grid_coords1:  [S, 2] pixel coords of each cell center in image 1
     """
     B = conf_matrix.shape[0]
     device = conf_matrix.device
 
-    # Build coarse grid positions in image pixel coords
-    y0, x0 = torch.meshgrid(torch.arange(H0, device=device), torch.arange(W0, device=device), indexing='ij')
-    pos0_x = (x0.float() + 0.5) / W0 * W_img  # [H0, W0]
-    pos0_y = (y0.float() + 0.5) / H0 * H_img
-    pos0 = torch.stack([pos0_x.flatten(), pos0_y.flatten()], dim=1)  # [L, 2]
-
-    y1, x1 = torch.meshgrid(torch.arange(H1, device=device), torch.arange(W1, device=device), indexing='ij')
-    pos1_x = (x1.float() + 0.5) / W1 * W_img
-    pos1_y = (y1.float() + 0.5) / H1 * H_img
-    pos1 = torch.stack([pos1_x.flatten(), pos1_y.flatten()], dim=1)  # [S, 2]
-
     total_loss = torch.tensor(0.0, device=device, requires_grad=True)
     count = 0
 
-    for i in range(B):
-        if i >= len(F_list) or F_list[i] is None:
+    for b in range(B):
+        if b >= len(F_list) or F_list[b] is None:
             continue
 
-        F_t = torch.tensor(F_list[i], dtype=torch.float32, device=device)
-        conf = conf_matrix[i]  # [L, S]
+        F_t = torch.tensor(F_list[b], dtype=torch.float32, device=device)
+        conf = conf_matrix[b]  # [L, S]
 
-        # Weighted average position in image 1 for each query point
-        # conf_sum[j] avoids division by zero
+        # Step A: soft match — center of mass in image 1
+        p1_soft = torch.einsum('ls,sd->ld', conf, grid_coords1)  # [L, 2]
         conf_sum = conf.sum(dim=1, keepdim=True).clamp(min=1e-8)  # [L, 1]
-        weights = conf / conf_sum  # [L, S] — normalized weights per row
-
-        # Soft match: p1_soft[i] = sum_j(w[i,j] * pos1[j])  — [L, 2]
-        p1_soft = weights @ pos1  # [L, S] x [S, 2] = [L, 2]
+        p1_soft = p1_soft / conf_sum  # [L, 2]
 
         # Homogeneous coords
-        ones = torch.ones(pos0.shape[0], 1, device=device)
-        p0h = torch.cat([pos0, ones], dim=1)       # [L, 3]
-        p1h = torch.cat([p1_soft, ones], dim=1)     # [L, 3]
+        ones = torch.ones(grid_coords0.shape[0], 1, device=device)
+        p0h = torch.cat([grid_coords0, ones], dim=1)  # [L, 3]
+        p1h = torch.cat([p1_soft, ones], dim=1)        # [L, 3]
 
-        # Sampson distance
+        # Step B: Sampson distance
         Fp0 = (F_t @ p0h.T).T       # [L, 3]
         Ftp1 = (F_t.T @ p1h.T).T    # [L, 3]
         num = (p1h * Fp0).sum(dim=1) ** 2
         denom = Fp0[:, :2].pow(2).sum(dim=1) + Ftp1[:, :2].pow(2).sum(dim=1)
-        sampson = num / (denom + 1e-8)
+        sampson = num / (denom + 1e-8)  # [L]
 
-        total_loss = total_loss + sampson.mean()
+        # Step C: confidence-weighted normalization
+        C_max = conf.max(dim=-1).values  # [L]
+        total_loss = total_loss + (C_max * sampson).sum() / (C_max.sum() + 1e-8)
         count += 1
 
     if count == 0:
@@ -242,27 +235,64 @@ def soft_sampson_loss(conf_matrix, F_list, H0, W0, H1, W1, H_img=480, W_img=640)
 
 
 class MatchFormerLoss(nn.Module):
-    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0):
+    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0, lambda_epi=0.7):
         super().__init__()
-        self.focal = FocalLoss(alpha=0.25, gamma=2.0, neg_per_pos=neg_per_pos)
         self.lambda_c = lambda_c
         self.lambda_f = lambda_f
+        self.lambda_epi = lambda_epi
+        # Keep GT focal for fallback when no epipolar data is available
+        self.focal_gt = FocalLoss(alpha=0.25, gamma=2.0, neg_per_pos=neg_per_pos)
+
+    def _build_grid_coords(self, H, W, H_img, W_img, device):
+        """Build pixel-space coordinates for coarse grid cell centers."""
+        y, x = torch.meshgrid(
+            torch.arange(H, device=device).float(),
+            torch.arange(W, device=device).float(), indexing='ij')
+        px = (x + 0.5) / W * W_img
+        py = (y + 0.5) / H * H_img
+        return torch.stack([px.flatten(), py.flatten()], dim=1)  # [H*W, 2]
 
     def forward(self, data):
         """
-        Args:
-            data (dict): model output augmented with supervision keys:
-                'conf_matrix', 'spv_b_ids', 'spv_i_ids', 'spv_j_ids', 'expec_f', 'gt_mask'
-        Returns:
-            dict with 'loss', 'loss_c', 'loss_f'
+        L_total = lambda_c * L_coarse + lambda_f * L_fine
+
+        L_coarse = (1 - lambda_epi) * L_focal_epi + lambda_epi * L_sampson
+          - L_focal_epi: focal loss with binary epipolar mask as pseudo-GT (no GT matches)
+          - L_sampson:   confidence-weighted Sampson distance at soft match positions
+
+        Requires in data:
+            'conf_matrix', 'epi_mask', 'F_list', 'hw0_c', 'hw1_c', 'hw0_i'
         """
         conf_matrix = data['conf_matrix']
-        spv_b = data['spv_b_ids']
-        spv_i = data['spv_i_ids']
-        spv_j = data['spv_j_ids']
-
-        loss_c = self.focal(conf_matrix, spv_b, spv_i, spv_j)
+        device = conf_matrix.device
         loss_f = fine_loss(data)
+
+        epi_mask = data.get('epi_mask')
+        F_list = data.get('F_list')
+
+        if epi_mask is not None and F_list is not None:
+            hw0_c = data['hw0_c']
+            hw1_c = data['hw1_c']
+            H_img, W_img = data['hw0_i']
+
+            # Focal loss with epipolar mask as pseudo-GT (search reward)
+            loss_focal = epi_focal_loss(conf_matrix, epi_mask)
+
+            # Soft Sampson loss (precision steering)
+            grid0 = self._build_grid_coords(hw0_c[0], hw0_c[1], H_img, W_img, device)
+            grid1 = self._build_grid_coords(hw1_c[0], hw1_c[1], H_img, W_img, device)
+            loss_sampson = soft_sampson_loss(conf_matrix, F_list, grid0, grid1)
+
+            # Combined: L_epi = (1 - λ) * L_focal + λ * L_sampson
+            loss_c = (1 - self.lambda_epi) * loss_focal + self.lambda_epi * loss_sampson
+        else:
+            # Fallback: GT-based focal loss (no epipolar data available)
+            spv_b = data['spv_b_ids']
+            spv_i = data['spv_i_ids']
+            spv_j = data['spv_j_ids']
+            loss_focal = self.focal_gt(conf_matrix, spv_b, spv_i, spv_j)
+            loss_sampson = torch.tensor(0.0, device=device)
+            loss_c = loss_focal
 
         total = self.lambda_c * loss_c + self.lambda_f * loss_f
 
@@ -270,4 +300,6 @@ class MatchFormerLoss(nn.Module):
             'loss': total,
             'loss_c': loss_c.detach(),
             'loss_f': loss_f.detach() if isinstance(loss_f, torch.Tensor) else torch.tensor(0.0),
+            'loss_focal': loss_focal.detach(),
+            'loss_sampson': loss_sampson.detach() if isinstance(loss_sampson, torch.Tensor) else torch.tensor(0.0),
         }

@@ -98,6 +98,61 @@ def compute_supervision(data, config):
         all_i_ids.append(i_ids)
         all_j_ids.append(j_ids)
 
+    # Compute fundamental matrices and epipolar mask for self-supervised loss
+    F_list = []
+    epi_masks = []
+    epi_thresh = getattr(config, 'EPI_THRESH', 2.0)  # pixels
+
+    # Grid positions in pixel coords for Image 0 and Image 1
+    y0g, x0g = torch.meshgrid(
+        torch.arange(H_c, device=device).float(),
+        torch.arange(W_c, device=device).float(), indexing='ij')
+    pos0_x = (x0g + 0.5) / W_c * W_img  # [H_c, W_c]
+    pos0_y = (y0g + 0.5) / H_c * H_img
+    # Homogeneous: [L, 3]
+    p0h = torch.stack([pos0_x.flatten(), pos0_y.flatten(),
+                       torch.ones(H_c * W_c, device=device)], dim=1)
+
+    y1g, x1g = torch.meshgrid(
+        torch.arange(H_c, device=device).float(),
+        torch.arange(W_c, device=device).float(), indexing='ij')
+    pos1_x = (x1g + 0.5) / W_c * W_img
+    pos1_y = (y1g + 0.5) / H_c * H_img
+    p1h = torch.stack([pos1_x.flatten(), pos1_y.flatten(),
+                       torch.ones(H_c * W_c, device=device)], dim=1)  # [S, 3]
+
+    for b in range(B):
+        T0_np = T0[b].cpu().float().numpy()
+        T1_np = T1[b].cpu().float().numpy()
+        K_np = K[b].cpu().float().numpy()
+        T_12 = np.linalg.inv(T1_np) @ T0_np
+        R = T_12[:3, :3]
+        t = T_12[:3, 3]
+        t_x = np.array([
+            [0, -t[2], t[1]],
+            [t[2], 0, -t[0]],
+            [-t[1], t[0], 0]
+        ])
+        E = t_x @ R
+        K_inv = np.linalg.inv(K_np)
+        F_mat = K_inv.T @ E @ K_inv
+        if abs(F_mat[2, 2]) > 1e-10:
+            F_mat = F_mat / F_mat[2, 2]
+        F_list.append(F_mat)
+
+        # Epipolar mask: for each point i in img0, mark cells in img1
+        # within epi_thresh pixels of the epipolar line l = F @ p0
+        F_t = torch.tensor(F_mat, dtype=torch.float32, device=device)
+        lines = p0h @ F_t.T  # [L, 3] — epipolar lines in image 1
+        # Point-to-line distance: |ax + by + c| / sqrt(a^2 + b^2)
+        numerator = torch.abs(lines @ p1h.T)  # [L, S]
+        denom = torch.sqrt(lines[:, 0:1] ** 2 + lines[:, 1:2] ** 2).clamp(min=1e-8)  # [L, 1]
+        dist = numerator / denom  # [L, S]
+        epi_masks.append((dist < epi_thresh).float())
+
+    data['F_list'] = F_list
+    data['epi_mask'] = torch.stack(epi_masks, dim=0)  # [B, L, S]
+
     if len(all_b_ids) == 0:
         # No valid GT matches in the batch — use empty tensors
         data.update({

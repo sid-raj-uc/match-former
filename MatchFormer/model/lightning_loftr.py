@@ -35,6 +35,7 @@ class PL_LoFTR(pl.LightningModule):
             lambda_c=getattr(config, 'LOSS_LAMBDA_C', 1.0),
             lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
             neg_per_pos=getattr(config, 'NEG_PER_POS', 0),
+            lambda_epi=getattr(config, 'LAMBDA_EPI', 0.7),
         )
         
         # Training hyperparameters
@@ -140,6 +141,8 @@ class PL_LoFTR(pl.LightningModule):
         self.log('train/loss',   losses['loss'],   on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/loss_c', losses['loss_c'], on_step=True, on_epoch=True)
         self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
+        self.log('train/loss_focal',   losses['loss_focal'],   on_step=True, on_epoch=True)
+        self.log('train/loss_sampson', losses['loss_sampson'], on_step=True, on_epoch=True)
 
         # GT supervision — how many ground truth matches were found this batch
         spv_b = batch.get('spv_b_ids')
@@ -170,6 +173,8 @@ class PL_LoFTR(pl.LightningModule):
         self.log('val/loss',   losses['loss'],   on_step=False, on_epoch=True, prog_bar=True)
         self.log('val/loss_c', losses['loss_c'], on_step=False, on_epoch=True)
         self.log('val/loss_f', losses['loss_f'], on_step=False, on_epoch=True)
+        self.log('val/loss_focal',   losses['loss_focal'],   on_step=False, on_epoch=True)
+        self.log('val/loss_sampson', losses['loss_sampson'], on_step=False, on_epoch=True)
 
         spv_b = batch.get('spv_b_ids')
         if spv_b is not None:
