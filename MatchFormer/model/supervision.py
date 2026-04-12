@@ -148,7 +148,16 @@ def compute_supervision(data, config):
         numerator = torch.abs(lines @ p1h.T)  # [L, S]
         denom = torch.sqrt(lines[:, 0:1] ** 2 + lines[:, 1:2] ** 2).clamp(min=1e-8)  # [L, 1]
         dist = numerator / denom  # [L, S]
-        epi_masks.append((dist < epi_thresh).float())
+        mask_b = (dist < epi_thresh).float()
+        epi_masks.append(mask_b)
+        # Debug: log mask stats to catch empty masks
+        if mask_b.sum() == 0:
+            from loguru import logger
+            logger.warning(
+                f"epi_mask is ALL ZEROS for batch {b}: "
+                f"dist min={dist.min().item():.4f}, median={dist.median().item():.4f}, "
+                f"max={dist.max().item():.4f}, thresh={epi_thresh}"
+            )
 
     data['F_list'] = F_list
     data['epi_mask'] = torch.stack(epi_masks, dim=0)  # [B, L, S]

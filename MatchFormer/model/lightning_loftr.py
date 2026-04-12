@@ -36,6 +36,7 @@ class PL_LoFTR(pl.LightningModule):
             lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
             neg_per_pos=getattr(config, 'NEG_PER_POS', 0),
             lambda_epi=getattr(config, 'LAMBDA_EPI', 0.7),
+            sampson_margin=getattr(config, 'SAMPSON_MARGIN', 1.0),
         )
         
         # Training hyperparameters
@@ -159,6 +160,11 @@ class PL_LoFTR(pl.LightningModule):
         if conf is not None:
             self.log('train/conf_max',  conf.max().item(),  on_step=True, on_epoch=False)
             self.log('train/conf_mean', conf.mean().item(), on_step=True, on_epoch=False)
+
+        # Epipolar mask health
+        epi_mask = batch.get('epi_mask')
+        if epi_mask is not None:
+            self.log('train/epi_mask_frac', epi_mask.mean().item(), on_step=True, on_epoch=False)
 
         return losses['loss']
 

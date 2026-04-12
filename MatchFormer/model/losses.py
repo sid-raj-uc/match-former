@@ -177,21 +177,25 @@ def sampson_epipolar_loss(mkpts0, mkpts1, F_mat, b_ids):
     return total_loss / count
 
 
-def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1):
+def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1, margin=0.0):
     """
     Precision-steering Sampson loss — fully differentiable through conf_matrix.
 
     Step A: Soft match via confidence-weighted center of mass:
         p1_soft[b,i] = sum_j(conf[b,i,j] * grid_coords1[j]) / sum_j(conf[b,i,j])
     Step B: Sampson distance d_S(p0[i], p1_soft[i], F)
-    Step C: Confidence-weighted normalization:
-        loss = sum(C_max * d_S) / (sum(C_max) + eps)
+    Step C: Apply geometric margin (dead zone):
+        d_S_margin = max(0, d_S - margin)
+    Step D: Confidence-weighted normalization:
+        loss = sum(C_max * d_S_margin) / (sum(C_max) + eps)
 
     Args:
         conf_matrix:   [B, L, S] dual-softmax confidence matrix
         F_list:        list of [3, 3] numpy F matrices (one per batch element)
         grid_coords0:  [L, 2] pixel coords of each cell center in image 0
         grid_coords1:  [S, 2] pixel coords of each cell center in image 1
+        margin:        geometric dead zone (in squared pixels). Matches within
+                       sqrt(margin) pixels of the line contribute zero loss.
     """
     B = conf_matrix.shape[0]
     device = conf_matrix.device
@@ -223,7 +227,11 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1):
         denom = Fp0[:, :2].pow(2).sum(dim=1) + Ftp1[:, :2].pow(2).sum(dim=1)
         sampson = num / (denom + 1e-8)  # [L]
 
-        # Step C: confidence-weighted normalization
+        # Step C: geometric margin (dead zone) — no penalty for near-line matches
+        if margin > 0:
+            sampson = torch.clamp(sampson - margin, min=0.0)
+
+        # Step D: confidence-weighted normalization
         C_max = conf.max(dim=-1).values  # [L]
         total_loss = total_loss + (C_max * sampson).sum() / (C_max.sum() + 1e-8)
         count += 1
@@ -235,11 +243,13 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1):
 
 
 class MatchFormerLoss(nn.Module):
-    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0, lambda_epi=0.7):
+    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0,
+                 lambda_epi=0.7, sampson_margin=1.0):
         super().__init__()
         self.lambda_c = lambda_c
         self.lambda_f = lambda_f
         self.lambda_epi = lambda_epi
+        self.sampson_margin = sampson_margin
         # Keep GT focal for fallback when no epipolar data is available
         self.focal_gt = FocalLoss(alpha=0.25, gamma=2.0, neg_per_pos=neg_per_pos)
 
@@ -281,7 +291,10 @@ class MatchFormerLoss(nn.Module):
             # Soft Sampson loss (precision steering)
             grid0 = self._build_grid_coords(hw0_c[0], hw0_c[1], H_img, W_img, device)
             grid1 = self._build_grid_coords(hw1_c[0], hw1_c[1], H_img, W_img, device)
-            loss_sampson = soft_sampson_loss(conf_matrix, F_list, grid0, grid1)
+            loss_sampson = soft_sampson_loss(
+                conf_matrix, F_list, grid0, grid1,
+                margin=self.sampson_margin,
+            )
 
             # Combined: L_epi = (1 - λ) * L_focal + λ * L_sampson
             loss_c = (1 - self.lambda_epi) * loss_focal + self.lambda_epi * loss_sampson
