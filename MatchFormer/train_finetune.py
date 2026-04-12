@@ -214,6 +214,14 @@ def main():
                         help='Geometric dead zone in pixels for Sampson loss.')
     parser.add_argument('--epi_thresh',     type=float, default=2.0,
                         help='Pixel distance to epipolar line for binary epi_mask.')
+    parser.add_argument('--focal_alpha',    type=float, default=0.5,
+                        help='Focal loss alpha. 0.25 heavy neg penalty, '
+                             '0.5 balanced, 0.75 heavy pos reward.')
+    parser.add_argument('--sampson_hold_steps', type=int, default=1000,
+                        help='Number of steps to hold lambda_epi=0 at start.')
+    parser.add_argument('--sampson_ramp_steps', type=int, default=500,
+                        help='Number of steps to linearly ramp lambda_epi '
+                             'from 0 to target after the hold phase.')
     parser.add_argument('--bench_every',    type=int, default=1000,
                         help='Run pose-AUC benchmark on val split every N steps. '
                              '0 = disabled.')
@@ -256,6 +264,9 @@ def main():
     config.LAMBDA_EPI     = args.lambda_epi
     config.SAMPSON_MARGIN = args.sampson_margin
     config.EPI_THRESH     = args.epi_thresh
+    config.FOCAL_ALPHA    = args.focal_alpha
+    config.SAMPSON_HOLD_STEPS = args.sampson_hold_steps
+    config.SAMPSON_RAMP_STEPS = args.sampson_ramp_steps
 
     # ── Dataset ─────────────────────────────────────────────────────────────
     max_pairs = 5 if args.overfit else None

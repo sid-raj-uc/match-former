@@ -33,11 +33,16 @@ class PL_LoFTR(pl.LightningModule):
         # Loss (only used in training)
         self.criterion = MatchFormerLoss(
             lambda_c=getattr(config, 'LOSS_LAMBDA_C', 1.0),
-            lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.5),
+            lambda_f=getattr(config, 'LOSS_LAMBDA_F', 0.0),
             neg_per_pos=getattr(config, 'NEG_PER_POS', 0),
             lambda_epi=getattr(config, 'LAMBDA_EPI', 0.7),
             sampson_margin=getattr(config, 'SAMPSON_MARGIN', 1.0),
+            focal_alpha=getattr(config, 'FOCAL_ALPHA', 0.5),
         )
+        # Sampson annealing: hold lambda_epi=0 for `sampson_hold` steps, then
+        # linearly ramp to the target over `sampson_ramp` steps.
+        self.sampson_hold = getattr(config, 'SAMPSON_HOLD_STEPS', 1000)
+        self.sampson_ramp = getattr(config, 'SAMPSON_RAMP_STEPS', 500)
         
         # Training hyperparameters
         self.lr = getattr(config, 'LR', 1e-4)
@@ -110,7 +115,27 @@ class PL_LoFTR(pl.LightningModule):
             'lr_scheduler': {'scheduler': scheduler, 'interval': 'step'}
         }
 
+    def _update_sampson_anneal(self):
+        """
+        Lambda_epi annealing schedule:
+          [0, hold)                   → 0
+          [hold, hold + ramp)         → linear ramp 0 → target
+          [hold + ramp, ∞)            → target
+        """
+        step = self.global_step
+        target = self.criterion.lambda_epi_target
+        if step < self.sampson_hold:
+            self.criterion.lambda_epi = 0.0
+        elif self.sampson_ramp > 0 and step < self.sampson_hold + self.sampson_ramp:
+            frac = (step - self.sampson_hold) / float(self.sampson_ramp)
+            self.criterion.lambda_epi = target * frac
+        else:
+            self.criterion.lambda_epi = target
+
     def training_step(self, batch, batch_idx):
+        # Sampson annealing: update lambda_epi based on global step
+        self._update_sampson_anneal()
+
         # Step 1: temporarily run in eval mode to populate hw0_c, hw1_c
         # without triggering coarse_matching's training-mode GT padding
         # (which needs spv_b_ids that don't exist yet)
@@ -144,6 +169,8 @@ class PL_LoFTR(pl.LightningModule):
         self.log('train/loss_f', losses['loss_f'], on_step=True, on_epoch=True)
         self.log('train/loss_focal',   losses['loss_focal'],   on_step=True, on_epoch=True)
         self.log('train/loss_sampson', losses['loss_sampson'], on_step=True, on_epoch=True)
+        self.log('train/lambda_epi',   float(self.criterion.lambda_epi),
+                 on_step=True, on_epoch=False)
 
         # GT supervision — how many ground truth matches were found this batch
         spv_b = batch.get('spv_b_ids')

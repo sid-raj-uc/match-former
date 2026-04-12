@@ -97,13 +97,18 @@ def fine_loss(data):
     return loss
 
 
-def epi_focal_loss(conf_matrix, epi_mask, alpha=0.25, gamma=2.0):
+def epi_focal_loss(conf_matrix, epi_mask, alpha=0.5, gamma=2.0):
     """
     Search-reward focal loss using epipolar binary mask as pseudo-GT.
     No GT point correspondences needed — only camera geometry.
 
     Pushes confidence high near epipolar lines (mask=1),
     low far away (mask=0).
+
+    alpha controls the positive/negative balance:
+      alpha=0.25: heavy neg penalty (discourages FP) — default for dense bg
+      alpha=0.5:  balanced
+      alpha=0.75: heavy pos reward (encourages high confidence on the line)
 
     Args:
         conf_matrix: [B, L, S] dual-softmax confidence matrix
@@ -237,8 +242,10 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1, margin=0.
         if margin > 0:
             sampson = torch.clamp(sampson - margin, min=0.0)
 
-        # Step D: confidence-weighted normalization
-        C_max = conf.max(dim=-1).values  # [L]
+        # Step D: confidence-weighted normalization.
+        # C_max is DETACHED so Sampson can't reduce loss by collapsing confidence —
+        # it must actually move soft-match positions onto the epipolar line.
+        C_max = conf.max(dim=-1).values.detach()  # [L]
         total_loss = total_loss + (C_max * sampson).sum() / (C_max.sum() + 1e-8)
         count += 1
 
@@ -250,12 +257,14 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1, margin=0.
 
 class MatchFormerLoss(nn.Module):
     def __init__(self, lambda_c=1.0, lambda_f=0.0, neg_per_pos=0,
-                 lambda_epi=0.7, sampson_margin=1.0):
+                 lambda_epi=0.7, sampson_margin=1.0, focal_alpha=0.5):
         super().__init__()
         self.lambda_c = lambda_c
         self.lambda_f = lambda_f  # kept for logging; pose-only setup uses 0
-        self.lambda_epi = lambda_epi
+        self.lambda_epi = lambda_epi              # mutated externally by annealing
+        self.lambda_epi_target = lambda_epi       # target value (for logging)
         self.sampson_margin = sampson_margin
+        self.focal_alpha = focal_alpha
 
     def _build_grid_coords(self, H, W, H_img, W_img, device):
         """Build pixel-space coordinates for coarse grid cell centers."""
@@ -290,7 +299,7 @@ class MatchFormerLoss(nn.Module):
         H_img, W_img = data['hw0_i']
 
         # Focal loss with epipolar mask as pseudo-GT (search reward)
-        loss_focal = epi_focal_loss(conf_matrix, epi_mask)
+        loss_focal = epi_focal_loss(conf_matrix, epi_mask, alpha=self.focal_alpha)
 
         # Soft Sampson loss (precision steering)
         grid0 = self._build_grid_coords(hw0_c[0], hw0_c[1], H_img, W_img, device)
