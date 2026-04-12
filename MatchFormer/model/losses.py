@@ -249,15 +249,13 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1, margin=0.
 
 
 class MatchFormerLoss(nn.Module):
-    def __init__(self, lambda_c=1.0, lambda_f=0.5, neg_per_pos=0,
+    def __init__(self, lambda_c=1.0, lambda_f=0.0, neg_per_pos=0,
                  lambda_epi=0.7, sampson_margin=1.0):
         super().__init__()
         self.lambda_c = lambda_c
-        self.lambda_f = lambda_f
+        self.lambda_f = lambda_f  # kept for logging; pose-only setup uses 0
         self.lambda_epi = lambda_epi
         self.sampson_margin = sampson_margin
-        # Keep GT focal for fallback when no epipolar data is available
-        self.focal_gt = FocalLoss(alpha=0.25, gamma=2.0, neg_per_pos=neg_per_pos)
 
     def _build_grid_coords(self, H, W, H_img, W_img, device):
         """Build pixel-space coordinates for coarse grid cell centers."""
@@ -270,55 +268,48 @@ class MatchFormerLoss(nn.Module):
 
     def forward(self, data):
         """
-        L_total = lambda_c * L_coarse + lambda_f * L_fine
+        Pose-only self-supervised loss:
+            L_total  = lambda_c * L_coarse
+            L_coarse = (1 - lambda_epi) * L_focal_epi + lambda_epi * L_sampson
 
-        L_coarse = (1 - lambda_epi) * L_focal_epi + lambda_epi * L_sampson
-          - L_focal_epi: focal loss with binary epipolar mask as pseudo-GT (no GT matches)
-          - L_sampson:   confidence-weighted Sampson distance at soft match positions
+        Both coarse terms depend ONLY on camera intrinsics + poses:
+          - L_focal_epi: focal loss with binary epipolar mask as pseudo-GT
+          - L_sampson:   confidence-weighted Sampson distance at soft matches
 
         Requires in data:
             'conf_matrix', 'epi_mask', 'F_list', 'hw0_c', 'hw1_c', 'hw0_i'
         """
         conf_matrix = data['conf_matrix']
         device = conf_matrix.device
-        loss_f = fine_loss(data)
 
-        epi_mask = data.get('epi_mask')
-        F_list = data.get('F_list')
+        epi_mask = data['epi_mask']
+        F_list = data['F_list']
 
-        if epi_mask is not None and F_list is not None:
-            hw0_c = data['hw0_c']
-            hw1_c = data['hw1_c']
-            H_img, W_img = data['hw0_i']
+        hw0_c = data['hw0_c']
+        hw1_c = data['hw1_c']
+        H_img, W_img = data['hw0_i']
 
-            # Focal loss with epipolar mask as pseudo-GT (search reward)
-            loss_focal = epi_focal_loss(conf_matrix, epi_mask)
+        # Focal loss with epipolar mask as pseudo-GT (search reward)
+        loss_focal = epi_focal_loss(conf_matrix, epi_mask)
 
-            # Soft Sampson loss (precision steering)
-            grid0 = self._build_grid_coords(hw0_c[0], hw0_c[1], H_img, W_img, device)
-            grid1 = self._build_grid_coords(hw1_c[0], hw1_c[1], H_img, W_img, device)
-            loss_sampson = soft_sampson_loss(
-                conf_matrix, F_list, grid0, grid1,
-                margin=self.sampson_margin,
-            )
+        # Soft Sampson loss (precision steering)
+        grid0 = self._build_grid_coords(hw0_c[0], hw0_c[1], H_img, W_img, device)
+        grid1 = self._build_grid_coords(hw1_c[0], hw1_c[1], H_img, W_img, device)
+        loss_sampson = soft_sampson_loss(
+            conf_matrix, F_list, grid0, grid1,
+            margin=self.sampson_margin,
+        )
 
-            # Combined: L_epi = (1 - λ) * L_focal + λ * L_sampson
-            loss_c = (1 - self.lambda_epi) * loss_focal + self.lambda_epi * loss_sampson
-        else:
-            # Fallback: GT-based focal loss (no epipolar data available)
-            spv_b = data['spv_b_ids']
-            spv_i = data['spv_i_ids']
-            spv_j = data['spv_j_ids']
-            loss_focal = self.focal_gt(conf_matrix, spv_b, spv_i, spv_j)
-            loss_sampson = torch.tensor(0.0, device=device)
-            loss_c = loss_focal
+        # Combined: L_coarse = (1 - λ_epi) * L_focal_epi + λ_epi * L_sampson
+        loss_c = (1 - self.lambda_epi) * loss_focal + self.lambda_epi * loss_sampson
 
-        total = self.lambda_c * loss_c + self.lambda_f * loss_f
+        # Pose-only setup: no fine loss (would require depth-derived GT offsets)
+        total = self.lambda_c * loss_c
 
         return {
             'loss': total,
             'loss_c': loss_c.detach(),
-            'loss_f': loss_f.detach() if isinstance(loss_f, torch.Tensor) else torch.tensor(0.0),
+            'loss_f': torch.tensor(0.0, device=device),
             'loss_focal': loss_focal.detach(),
-            'loss_sampson': loss_sampson.detach() if isinstance(loss_sampson, torch.Tensor) else torch.tensor(0.0),
+            'loss_sampson': loss_sampson.detach(),
         }

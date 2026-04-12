@@ -96,8 +96,9 @@ def main():
                         choices=['sequential', 'random'])
     parser.add_argument('--lambda_c',       type=float, default=1.0,
                         help='Weight on coarse loss.')
-    parser.add_argument('--lambda_f',       type=float, default=0.5,
-                        help='Weight on fine loss.')
+    parser.add_argument('--lambda_f',       type=float, default=0.0,
+                        help='Weight on fine loss. 0 in pose-only setup '
+                             '(fine loss needs depth-derived GT).')
     parser.add_argument('--lambda_epi',     type=float, default=0.7,
                         help='L_coarse = (1-λ)·L_focal_epi + λ·L_sampson. Default 0.7.')
     parser.add_argument('--sampson_margin', type=float, default=1.0,
