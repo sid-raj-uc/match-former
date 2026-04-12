@@ -17,6 +17,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -74,16 +75,13 @@ def constrained_forward(self, feat_c0, feat_c1, data, mask_c0=None, mask_c1=None
 CoarseMatching.forward = constrained_forward
 
 
-def run_model(model, item, device, F_mat=None, tau=10.0):
-    """Run inference on a single dataset item."""
-    input_data = {
-        'image0': item['image0'].unsqueeze(0).to(device),
-        'image1': item['image1'].unsqueeze(0).to(device),
-    }
+def run_model(model, image0, image1, device, F_mat=None, tau=10.0):
+    """Run inference on a pre-loaded image pair (already on device, batched)."""
+    input_data = {'image0': image0, 'image1': image1}
     model.matcher.coarse_matching.epipolar_F = F_mat
     if F_mat is not None:
         model.matcher.coarse_matching.epipolar_tau = tau
-    with torch.no_grad():
+    with torch.inference_mode():
         model.matcher(input_data)
     mkpts0 = input_data['mkpts0_f'].cpu().numpy()
     mkpts1 = input_data['mkpts1_f'].cpu().numpy()
@@ -95,7 +93,7 @@ def main():
     parser = argparse.ArgumentParser(description='Benchmark on 10% test split')
     parser.add_argument('--data_dir', default='../data/scans/scene0000_00/exported')
     parser.add_argument('--vanilla_ckpt', default='model/weights/indoor-lite-LA.ckpt')
-    parser.add_argument('--finetuned_ckpt', default='phase2/weights/loss-2-epi-0-2.ckpt')
+    parser.add_argument('--finetuned_ckpt', default='phase2/weights/loss-3.ckpt')
     parser.add_argument('--split_seed', type=int, default=42)
     parser.add_argument('--frame_gap', type=int, default=20)
     parser.add_argument('--tau', type=float, default=10.0)
@@ -103,6 +101,8 @@ def main():
     parser.add_argument('--split', default='test', choices=['train', 'test', 'all'],
                         help="'all' evaluates on the entire dataset")
     parser.add_argument('--split_ratio', type=float, default=0.9)
+    parser.add_argument('--workers', type=int, default=4,
+                        help='DataLoader workers for image prefetching (Mac: 4 is good)')
     args = parser.parse_args()
 
     # Device
@@ -135,23 +135,37 @@ def main():
     model_finetuned = PL_LoFTR(config, pretrained_ckpt=args.finetuned_ckpt).to(device).eval()
 
     # ── Run benchmark ────────────────────────────────────────────────────────
-    variants = {
-        'Vanilla': {'model': model_vanilla, 'use_epi': False, 'thr': 0.2},
-        'Vanilla+Epipolar': {'model': model_vanilla, 'use_epi': True, 'thr': 0.2},
-        'Fine-Tuned': {'model': model_finetuned, 'use_epi': False, 'thr': 0.2},
-        'Fine-Tuned (thr=0.05)': {'model': model_finetuned, 'use_epi': False, 'thr': 0.05},
-        'Fine-Tuned (thr=0.01)': {'model': model_finetuned, 'use_epi': False, 'thr': 0.01},
-    }
+    # Forward-pass groups: each group runs the model once.
+    # 'thresholds' lists post-filter thresholds applied to that group's mconf.
+    forward_groups = [
+        # (name, model, use_epi, fwd_thr, post_thresholds)
+        ('vanilla',          model_vanilla,    False, 0.2,  [('Vanilla', 0.2)]),
+        # ('vanilla_epi',      model_vanilla,    True,  0.2,  [('Vanilla+Epipolar', 0.2)]),
+        # Fine-tuned: forward once at the lowest threshold, post-filter for the others
+        ('finetuned',        model_finetuned,  False, 0.01, [
+            ('Fine-Tuned',          0.2),
+            ('Fine-Tuned (thr=0.05)', 0.1),
+            ('Fine-Tuned (thr=0.05)', 0.05),
+            ('Fine-Tuned (thr=0.01)', 0.01),
+        ]),
+    ]
 
+    variant_names = [name for _, _, _, _, posts in forward_groups for name, _ in posts]
     results = {name: {'R_errs': [], 't_errs': [], 'n_matches': [], 'precisions': []}
-               for name in variants}
+               for name in variant_names}
+
+    # DataLoader prefetches images on worker threads while GPU runs forward pass
+    loader = DataLoader(
+        val_ds, batch_size=1, shuffle=False,
+        num_workers=args.workers, pin_memory=(device != 'mps'),
+        persistent_workers=(args.workers > 0),
+    )
 
     pbar = tqdm(total=len(val_ds), desc='Benchmarking', unit='pair')
-    for i in range(len(val_ds)):
-        item = val_ds[i]
-        T0 = item['T0'].numpy()
-        T1 = item['T1'].numpy()
-        K = item['K'].numpy()
+    for batch in loader:
+        T0 = batch['T0'][0].numpy()
+        T1 = batch['T1'][0].numpy()
+        K = batch['K'][0].numpy()
 
         if not np.isfinite(T0).all() or not np.isfinite(T1).all():
             pbar.update(1)
@@ -160,29 +174,39 @@ def main():
         T_0to1 = np.linalg.inv(T1) @ T0
         F_mat = compute_fundamental_matrix(T0, T1, K, K)
 
-        for name, cfg in variants.items():
-            model = cfg['model']
-            model.matcher.coarse_matching.thr = cfg['thr']
+        # Transfer images to device once, reuse across all forward groups
+        image0 = batch['image0'].to(device, non_blocking=True)
+        image1 = batch['image1'].to(device, non_blocking=True)
 
-            epi_F = F_mat if cfg['use_epi'] else None
-            mkpts0, mkpts1, mconf = run_model(model, item, device, F_mat=epi_F, tau=args.tau)
+        for _, model, use_epi, fwd_thr, post_thresholds in forward_groups:
+            model.matcher.coarse_matching.thr = fwd_thr
+            epi_F = F_mat if use_epi else None
+            mkpts0, mkpts1, mconf = run_model(model, image0, image1, device, F_mat=epi_F, tau=args.tau)
 
-            n_matches = len(mkpts0)
-            ret = estimate_pose(mkpts0, mkpts1, K, K, thresh=0.5, conf=0.99999)
+            for variant_name, post_thr in post_thresholds:
+                # Post-filter by confidence
+                if post_thr > fwd_thr:
+                    keep = mconf >= post_thr
+                    mk0, mk1 = mkpts0[keep], mkpts1[keep]
+                else:
+                    mk0, mk1 = mkpts0, mkpts1
 
-            if ret is None:
-                results[name]['R_errs'].append(np.inf)
-                results[name]['t_errs'].append(np.inf)
-                results[name]['n_matches'].append(n_matches)
-                results[name]['precisions'].append(0.0)
-            else:
-                R, t, inliers = ret
-                t_err, R_err = relative_pose_error(T_0to1, R, t, ignore_gt_t_thr=0.0)
-                prec = np.mean(inliers) if len(inliers) > 0 else 0.0
-                results[name]['R_errs'].append(R_err)
-                results[name]['t_errs'].append(t_err)
-                results[name]['n_matches'].append(n_matches)
-                results[name]['precisions'].append(prec)
+                n_matches = len(mk0)
+                ret = estimate_pose(mk0, mk1, K, K, thresh=0.5, conf=0.99999)
+
+                if ret is None:
+                    results[variant_name]['R_errs'].append(np.inf)
+                    results[variant_name]['t_errs'].append(np.inf)
+                    results[variant_name]['n_matches'].append(n_matches)
+                    results[variant_name]['precisions'].append(0.0)
+                else:
+                    R, t, inliers = ret
+                    t_err, R_err = relative_pose_error(T_0to1, R, t, ignore_gt_t_thr=0.0)
+                    prec = np.mean(inliers) if len(inliers) > 0 else 0.0
+                    results[variant_name]['R_errs'].append(R_err)
+                    results[variant_name]['t_errs'].append(t_err)
+                    results[variant_name]['n_matches'].append(n_matches)
+                    results[variant_name]['precisions'].append(prec)
 
         pbar.update(1)
     pbar.close()
@@ -194,7 +218,7 @@ def main():
     print(f'{"Method":<25} | {"AUC@5°":>7} {"AUC@10°":>8} {"AUC@20°":>8} | {"P(%)":>6} | {"Matches":>8}')
     print(f'{"-"*25}-+-{"-"*26}-+-{"-"*6}-+-{"-"*8}')
 
-    for name in variants:
+    for name in variant_names:
         r = results[name]
         if len(r['R_errs']) == 0:
             print(f'{name:<25} | {"N/A":>7} {"N/A":>8} {"N/A":>8} | {"N/A":>6} | {"N/A":>8}')

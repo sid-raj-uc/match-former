@@ -183,19 +183,24 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1, margin=0.
 
     Step A: Soft match via confidence-weighted center of mass:
         p1_soft[b,i] = sum_j(conf[b,i,j] * grid_coords1[j]) / sum_j(conf[b,i,j])
-    Step B: Sampson distance d_S(p0[i], p1_soft[i], F)
-    Step C: Apply geometric margin (dead zone):
+    Step B: Sampson distance d_S^2 (squared pixel units), then sqrt → pixel units:
+        d_S = sqrt(d_S^2 + eps)
+    Step C: Apply geometric margin (dead zone, in pixels):
         d_S_margin = max(0, d_S - margin)
     Step D: Confidence-weighted normalization:
         loss = sum(C_max * d_S_margin) / (sum(C_max) + eps)
+
+    The sqrt makes the penalty linear in pixel error (Huber/L1-like), preventing
+    outlier matches from dominating the gradient. Combined with the margin, this
+    yields a robust precision objective that doesn't drive confidence collapse.
 
     Args:
         conf_matrix:   [B, L, S] dual-softmax confidence matrix
         F_list:        list of [3, 3] numpy F matrices (one per batch element)
         grid_coords0:  [L, 2] pixel coords of each cell center in image 0
         grid_coords1:  [S, 2] pixel coords of each cell center in image 1
-        margin:        geometric dead zone (in squared pixels). Matches within
-                       sqrt(margin) pixels of the line contribute zero loss.
+        margin:        geometric dead zone in PIXELS. Matches within `margin`
+                       pixels of the epipolar line contribute zero loss.
     """
     B = conf_matrix.shape[0]
     device = conf_matrix.device
@@ -220,14 +225,15 @@ def soft_sampson_loss(conf_matrix, F_list, grid_coords0, grid_coords1, margin=0.
         p0h = torch.cat([grid_coords0, ones], dim=1)  # [L, 3]
         p1h = torch.cat([p1_soft, ones], dim=1)        # [L, 3]
 
-        # Step B: Sampson distance
+        # Step B: Sampson distance — squared pixel units, then sqrt → pixels
         Fp0 = (F_t @ p0h.T).T       # [L, 3]
         Ftp1 = (F_t.T @ p1h.T).T    # [L, 3]
         num = (p1h * Fp0).sum(dim=1) ** 2
         denom = Fp0[:, :2].pow(2).sum(dim=1) + Ftp1[:, :2].pow(2).sum(dim=1)
-        sampson = num / (denom + 1e-8)  # [L]
+        sampson_sq = num / (denom + 1e-8)            # [L] squared pixels
+        sampson = torch.sqrt(sampson_sq + 1e-8)      # [L] pixels (L1-like)
 
-        # Step C: geometric margin (dead zone) — no penalty for near-line matches
+        # Step C: geometric margin (dead zone) — no penalty within `margin` pixels
         if margin > 0:
             sampson = torch.clamp(sampson - margin, min=0.0)
 
