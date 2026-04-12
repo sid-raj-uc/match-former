@@ -24,6 +24,7 @@ import re
 import glob
 import sys
 import argparse
+import numpy as np
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
@@ -33,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.defaultmf import get_cfg_defaults
 from model.lightning_loftr import PL_LoFTR
 from model.datasets.scannet_simple import ScanNetSimpleDataset
+from model.utils.metrics import estimate_pose, relative_pose_error, error_auc
 
 
 # ── Collate function ─────────────────────────────────────────────────────────
@@ -62,6 +64,113 @@ class LROverrideCallback(pl.Callback):
             for param_group in optimizer.param_groups:
                 param_group['lr'] = self.lr
         print(f"[LROverride] Learning rate set to {self.lr}")
+
+
+class PoseAUCCallback(pl.Callback):
+    """
+    Every `every_n_steps` training steps, runs pose estimation over the val
+    dataset and logs AUC@5/10/20, precision, and mean num_matches to W&B.
+
+    Mirrors benchmark_test_split.py but runs on the in-memory fine-tuned model,
+    with configurable confidence thresholds (default [0.2, 0.05, 0.01]).
+    """
+    def __init__(self, val_loader, every_n_steps=1000, thresholds=(0.2, 0.05, 0.01),
+                 ransac_thresh=0.5, ransac_conf=0.99999):
+        self.val_loader = val_loader
+        self.every_n_steps = every_n_steps
+        self.thresholds = sorted(thresholds)  # ascending so lowest is fwd thr
+        self.ransac_thresh = ransac_thresh
+        self.ransac_conf = ransac_conf
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        step = trainer.global_step
+        if step == 0 or step % self.every_n_steps != 0:
+            return
+        self._run_benchmark(trainer, pl_module, step)
+
+    @torch.no_grad()
+    def _run_benchmark(self, trainer, pl_module, step):
+        device = pl_module.device
+        matcher = pl_module.matcher
+        was_training = matcher.training
+        matcher.eval()
+
+        # Forward once at the lowest threshold, post-filter by mconf for the rest
+        fwd_thr = self.thresholds[0]
+        orig_thr = matcher.coarse_matching.thr
+        matcher.coarse_matching.thr = fwd_thr
+
+        results = {thr: {'R_errs': [], 't_errs': [], 'precisions': [], 'n_matches': []}
+                   for thr in self.thresholds}
+
+        for batch in self.val_loader:
+            T0 = batch['T0'][0].numpy()
+            T1 = batch['T1'][0].numpy()
+            K = batch['K'][0].numpy()
+            if not (np.isfinite(T0).all() and np.isfinite(T1).all()):
+                continue
+            T_0to1 = np.linalg.inv(T1) @ T0
+
+            input_data = {
+                'image0': batch['image0'].to(device, non_blocking=True),
+                'image1': batch['image1'].to(device, non_blocking=True),
+            }
+            with torch.inference_mode():
+                matcher(input_data)
+
+            mkpts0 = input_data['mkpts0_f'].cpu().numpy()
+            mkpts1 = input_data['mkpts1_f'].cpu().numpy()
+            mconf = input_data.get('mconf')
+            mconf = mconf.cpu().numpy() if mconf is not None else np.ones(len(mkpts0))
+
+            for thr in self.thresholds:
+                if thr > fwd_thr:
+                    keep = mconf >= thr
+                    mk0, mk1 = mkpts0[keep], mkpts1[keep]
+                else:
+                    mk0, mk1 = mkpts0, mkpts1
+
+                n = len(mk0)
+                ret = estimate_pose(mk0, mk1, K, K,
+                                    thresh=self.ransac_thresh, conf=self.ransac_conf)
+                if ret is None:
+                    results[thr]['R_errs'].append(np.inf)
+                    results[thr]['t_errs'].append(np.inf)
+                    results[thr]['precisions'].append(0.0)
+                else:
+                    R, t, inliers = ret
+                    t_err, R_err = relative_pose_error(T_0to1, R, t, ignore_gt_t_thr=0.0)
+                    results[thr]['R_errs'].append(R_err)
+                    results[thr]['t_errs'].append(t_err)
+                    results[thr]['precisions'].append(
+                        float(np.mean(inliers)) if len(inliers) > 0 else 0.0)
+                results[thr]['n_matches'].append(n)
+
+        # Log AUC + precision + num_matches for each threshold
+        for thr in self.thresholds:
+            r = results[thr]
+            if len(r['R_errs']) == 0:
+                continue
+            pose_errors = np.maximum(np.array(r['R_errs']), np.array(r['t_errs']))
+            aucs = error_auc(pose_errors, [5, 10, 20])
+            tag = f"bench_thr{thr:.2f}"
+            pl_module.log(f'{tag}/auc5',  float(aucs['auc@5']  * 100), on_step=True)
+            pl_module.log(f'{tag}/auc10', float(aucs['auc@10'] * 100), on_step=True)
+            pl_module.log(f'{tag}/auc20', float(aucs['auc@20'] * 100), on_step=True)
+            pl_module.log(f'{tag}/precision',  float(np.mean(r['precisions']) * 100), on_step=True)
+            pl_module.log(f'{tag}/num_matches', float(np.mean(r['n_matches'])), on_step=True)
+
+        print(f"\n[PoseAUC step={step}] " + " | ".join(
+            f"thr={thr:.2f} AUC@5/10/20={error_auc(np.maximum(np.array(results[thr]['R_errs']), np.array(results[thr]['t_errs'])), [5,10,20])['auc@5']*100:.1f}"
+            f"/{error_auc(np.maximum(np.array(results[thr]['R_errs']), np.array(results[thr]['t_errs'])), [5,10,20])['auc@10']*100:.1f}"
+            f"/{error_auc(np.maximum(np.array(results[thr]['R_errs']), np.array(results[thr]['t_errs'])), [5,10,20])['auc@20']*100:.1f} "
+            f"n={np.mean(results[thr]['n_matches']):.0f}"
+            for thr in self.thresholds if len(results[thr]['R_errs']) > 0))
+
+        # Restore
+        matcher.coarse_matching.thr = orig_thr
+        if was_training:
+            matcher.train()
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -105,6 +214,12 @@ def main():
                         help='Geometric dead zone in pixels for Sampson loss.')
     parser.add_argument('--epi_thresh',     type=float, default=2.0,
                         help='Pixel distance to epipolar line for binary epi_mask.')
+    parser.add_argument('--bench_every',    type=int, default=1000,
+                        help='Run pose-AUC benchmark on val split every N steps. '
+                             '0 = disabled.')
+    parser.add_argument('--bench_thresholds', type=float, nargs='+',
+                        default=[0.1, 0.05, 0.01],
+                        help='Confidence thresholds for pose-AUC benchmark.')
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -197,6 +312,15 @@ def main():
     if args.override_lr:
         callbacks.append(LROverrideCallback(args.lr))
         print(f"[Phase 2] LR override active: will set lr={args.lr} after checkpoint load")
+
+    if args.bench_every > 0 and not args.overfit:
+        callbacks.append(PoseAUCCallback(
+            val_loader=val_loader,
+            every_n_steps=args.bench_every,
+            thresholds=tuple(args.bench_thresholds),
+        ))
+        print(f"[PoseAUC] Benchmarking every {args.bench_every} steps "
+              f"at thresholds {args.bench_thresholds}")
 
     precision = args.precision
     if precision == 'bf16':

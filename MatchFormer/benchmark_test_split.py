@@ -93,7 +93,7 @@ def main():
     parser = argparse.ArgumentParser(description='Benchmark on 10% test split')
     parser.add_argument('--data_dir', default='../data/scans/scene0000_00/exported')
     parser.add_argument('--vanilla_ckpt', default='model/weights/indoor-lite-LA.ckpt')
-    parser.add_argument('--finetuned_ckpt', default='phase2/weights/loss-3.ckpt')
+    parser.add_argument('--finetuned_ckpt', default='phase2/weights/run-7.ckpt')
     parser.add_argument('--split_seed', type=int, default=42)
     parser.add_argument('--frame_gap', type=int, default=20)
     parser.add_argument('--tau', type=float, default=10.0)
@@ -142,11 +142,12 @@ def main():
         ('vanilla',          model_vanilla,    False, 0.2,  [('Vanilla', 0.2)]),
         # ('vanilla_epi',      model_vanilla,    True,  0.2,  [('Vanilla+Epipolar', 0.2)]),
         # Fine-tuned: forward once at the lowest threshold, post-filter for the others
-        ('finetuned',        model_finetuned,  False, 0.01, [
+        ('finetuned',        model_finetuned,  False, 0.005, [
             ('Fine-Tuned',          0.2),
-            ('Fine-Tuned (thr=0.05)', 0.1),
+            ('Fine-Tuned (thr=0.1)', 0.1),
             ('Fine-Tuned (thr=0.05)', 0.05),
             ('Fine-Tuned (thr=0.01)', 0.01),
+            ('Fine-Tuned (thr=0.005)', 0.005),
         ]),
     ]
 
